@@ -34,7 +34,7 @@ FUNCTION_NAME="calories-bot"
 RUNTIME="python312"
 ENTRYPOINT="index.handler"
 MEMORY="256m"
-TIMEOUT="60s"
+TIMEOUT="120s"
 
 # -----------------------------------------------------------------------------
 # Вспомогательные функции

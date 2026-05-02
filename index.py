@@ -22,7 +22,7 @@ WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")
 
 AI_API_KEY       = os.getenv("YC_API_KEY")
 AI_AGENT_ID      = os.getenv("AI_AGENT_ID")
-AI_TIMEOUT       = 25.0   # секунд — максимум ждём ответа от AI
+AI_TIMEOUT       = 55   # секунд — максимум ждём ответа от AI
 
 ai_client = openai.OpenAI(
     api_key=AI_API_KEY,
