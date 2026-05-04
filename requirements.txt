@@ -2,3 +2,4 @@ openai>=1.66.0
 requests==2.31.0
 ydb==3.5.0
 ydb[yc]
+boto3>=1.34.0
