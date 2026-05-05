@@ -305,10 +305,22 @@ def call_ai(user_message: str) -> dict:
 
 # -- Async self-invocation ---------------------------------------------------
 
-def invoke_self_async(function_id: str, iam_token: str, task: dict):
+def _get_iam_token() -> str:
+    """Получает IAM токен сервисного аккаунта через metadata service."""
+    resp = requests.get(
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
+        headers={"Metadata-Flavor": "Google"},
+        timeout=5,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def invoke_self_async(function_id: str, task: dict):
     """Вызывает эту же функцию асинхронно с задачей AI.
     Yandex Cloud возвращает 202 мгновенно, функция выполняется в фоне."""
-    logger.info(f"invoke_self_async: function_id={function_id} token_present={bool(iam_token)}")
+    iam_token = _get_iam_token()
+    logger.info(f"invoke_self_async: function_id={function_id}")
     resp = requests.post(
         f"https://functions.yandexcloud.com/functions/{function_id}/invoke",
         params={"integration": "async"},
@@ -638,7 +650,7 @@ def handler(event, context):
                 clear_pending_rewrite(user_id)
                 tg_send(chat_id, f"Считаю калории для {pending_date}...")
                 try:
-                    invoke_self_async(context.function_id, context.token["access_token"], {
+                    invoke_self_async(context.function_id, {
                         "task_type": "rewrite",
                         "chat_id":   chat_id,
                         "user_id":   user_id,
@@ -714,7 +726,7 @@ def handler(event, context):
                     return {"statusCode": 200, "body": "ok"}
                 tg_send(chat_id, f"Считаю калории для {today}...")
                 try:
-                    invoke_self_async(context.function_id, context.token["access_token"], {
+                    invoke_self_async(context.function_id, {
                         "task_type": "rewrite",
                         "chat_id":   chat_id,
                         "user_id":   user_id,
@@ -737,7 +749,7 @@ def handler(event, context):
                     return {"statusCode": 200, "body": "ok"}
                 tg_send(chat_id, f"Считаю калории для {date_str}...")
                 try:
-                    invoke_self_async(context.function_id, context.token["access_token"], {
+                    invoke_self_async(context.function_id, {
                         "task_type": "rewrite",
                         "chat_id":   chat_id,
                         "user_id":   user_id,
@@ -761,7 +773,7 @@ def handler(event, context):
 
             tg_send(chat_id, "Считаю калории...")
             try:
-                invoke_self_async(context.function_id, context.token["access_token"], {
+                invoke_self_async(context.function_id, {
                     "task_type": "food",
                     "chat_id":   chat_id,
                     "user_id":   user_id,
