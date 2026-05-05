@@ -326,24 +326,57 @@ def clear_pending_rewrite(user_id: int) -> None:
 # AI
 # ============================================================================
 
+def _to_number(v) -> float:
+    """Конвертирует значение в float. Поддерживает строки ('185', '13.0').
+    Возвращает None если конвертация невозможна."""
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _coerce_item_numbers(item: dict) -> bool:
+    """Приводит числовые поля item к float in-place. Возвращает False если
+    хотя бы одно поле не конвертируется."""
+    for f in ("weight_g", "kcal", "protein_g", "fat_g", "carb_g"):
+        v = _to_number(item.get(f))
+        if v is None:
+            logger.error(f"item field '{f}' cannot convert: {item.get(f)!r}")
+            return False
+        item[f] = v
+    return True
+
+
 def validate_ai_response(data: dict) -> bool:
     if not isinstance(data, dict):
+        logger.error("AI response is not a dict")
         return False
     if "items" not in data or not isinstance(data["items"], list):
+        logger.error(f"AI response missing 'items' list, keys={list(data.keys())}")
         return False
     if "total_kcal" not in data:
+        logger.error(f"AI response missing 'total_kcal', keys={list(data.keys())}")
         return False
     if "total" not in data or not isinstance(data["total"], dict):
+        logger.error(f"AI response missing 'total' dict, keys={list(data.keys())}")
         return False
     required = {"name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g"}
-    for item in data["items"]:
+    for i, item in enumerate(data["items"]):
         if not isinstance(item, dict):
+            logger.error(f"item[{i}] is not a dict: {item!r}")
             return False
-        if not required.issubset(item.keys()):
+        missing = required - item.keys()
+        if missing:
+            logger.error(f"item[{i}] missing fields: {missing}, item={item}")
             return False
-        for f in ("weight_g", "kcal", "protein_g", "fat_g", "carb_g"):
-            if not isinstance(item[f], (int, float)):
-                return False
+        if not _coerce_item_numbers(item):
+            return False
     return True
 
 
@@ -355,24 +388,47 @@ def call_ai(user_message: str) -> dict:
         input=user_message,
         timeout=AI_TIMEOUT,
     )
-    content = response.output_text.strip()
-    logger.info(f"AI response: {content[:200]}")
+    raw = response.output_text
+    logger.info(f"AI raw ({len(raw)} chars): {raw[:600]}")
 
-    # Агент иногда заворачивает ответ в ```json ... ```
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-        content = content.strip()
+    content = raw.strip()
+
+    # Шаг 1: убираем ```json ... ``` блоки
+    if "```" in content:
+        parts = content.split("```")
+        # parts[1] — содержимое первого блока
+        if len(parts) >= 3:
+            block = parts[1]
+            if block.startswith("json"):
+                block = block[4:]
+            content = block.strip()
+        else:
+            # нечётное число ``` — просто убираем их
+            content = content.replace("```json", "").replace("```", "").strip()
+
+    # Шаг 2: если модель добавила текст до/после JSON — вырезаем объект
+    if not content.startswith("{"):
+        start = content.find("{")
+        end   = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            content = content[start:end + 1]
+        else:
+            logger.error(f"AI: не удалось найти JSON-объект в ответе: {content[:400]}")
+            raise json.JSONDecodeError("no JSON object found", content, 0)
 
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        logger.error(f"AI returned non-JSON: {content[:300]}")
+        logger.error(f"AI non-JSON (len={len(content)}): {content[:500]}")
         raise
 
     if not validate_ai_response(data):
-        logger.error(f"AI response invalid structure: {str(data)[:300]}")
+        # Логируем полную структуру, чтобы понять что именно не так
+        try:
+            full = json.dumps(data, ensure_ascii=False)
+        except Exception:
+            full = str(data)
+        logger.error(f"AI invalid structure (len={len(full)}): {full[:1000]}")
         raise ValueError("AI response invalid")
 
     return data
