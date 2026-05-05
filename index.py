@@ -10,7 +10,7 @@ import ydb
 import ydb.iam
 
 # -- Логгер ------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger()
 
 # -- Конфиг ------------------------------------------------------------------
@@ -322,7 +322,7 @@ def invoke_self_async(function_id: str, task: dict):
     iam_token = _get_iam_token()
     logger.info(f"invoke_self_async: function_id={function_id}")
     resp = requests.post(
-        f"https://functions.yandexcloud.com/functions/{function_id}/invoke",
+        f"https://functions.yandexcloud.net/functions/{function_id}/invoke",
         params={"integration": "async"},
         headers={
             "Authorization": f"Bearer {iam_token}",
