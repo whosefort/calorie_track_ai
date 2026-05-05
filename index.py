@@ -308,6 +308,7 @@ def call_ai(user_message: str) -> dict:
 def invoke_self_async(function_id: str, iam_token: str, task: dict):
     """Вызывает эту же функцию асинхронно с задачей AI.
     Yandex Cloud возвращает 202 мгновенно, функция выполняется в фоне."""
+    logger.info(f"invoke_self_async: function_id={function_id} token_present={bool(iam_token)}")
     resp = requests.post(
         f"https://functions.yandexcloud.com/functions/{function_id}/invoke",
         params={"integration": "async"},
@@ -318,10 +319,9 @@ def invoke_self_async(function_id: str, iam_token: str, task: dict):
         data=json.dumps({"_async_task": task}, ensure_ascii=False),
         timeout=10,
     )
-    logger.info(f"Async self-invoke: HTTP {resp.status_code}")
+    logger.info(f"Async self-invoke: HTTP {resp.status_code} body={resp.text[:200]}")
     if resp.status_code not in (200, 202):
-        logger.error(f"Async invoke failed: {resp.text[:200]}")
-        raise RuntimeError(f"Async invoke returned {resp.status_code}")
+        raise RuntimeError(f"Async invoke returned {resp.status_code}: {resp.text[:200]}")
 
 
 # -- Async task handlers -----------------------------------------------------
@@ -637,13 +637,17 @@ def handler(event, context):
             if pending_date:
                 clear_pending_rewrite(user_id)
                 tg_send(chat_id, f"Считаю калории для {pending_date}...")
-                invoke_self_async(context.function_id, context.token["access_token"], {
-                    "task_type": "rewrite",
-                    "chat_id":   chat_id,
-                    "user_id":   user_id,
-                    "text":      text,
-                    "date_utc":  pending_date,
-                })
+                try:
+                    invoke_self_async(context.function_id, context.token["access_token"], {
+                        "task_type": "rewrite",
+                        "chat_id":   chat_id,
+                        "user_id":   user_id,
+                        "text":      text,
+                        "date_utc":  pending_date,
+                    })
+                except Exception as e:
+                    logger.error(f"invoke_self_async failed: {e}", exc_info=True)
+                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
                 logger.info("=== WEBHOOK DONE (rewrite queued) ===")
                 return {"statusCode": 200, "body": "ok"}
 
@@ -709,13 +713,17 @@ def handler(event, context):
                     tg_send(chat_id, f"Сообщение слишком длинное. Максимум {MAX_MESSAGE_LENGTH} символов.")
                     return {"statusCode": 200, "body": "ok"}
                 tg_send(chat_id, f"Считаю калории для {today}...")
-                invoke_self_async(context.function_id, context.token["access_token"], {
-                    "task_type": "rewrite",
-                    "chat_id":   chat_id,
-                    "user_id":   user_id,
-                    "text":      new_text,
-                    "date_utc":  today,
-                })
+                try:
+                    invoke_self_async(context.function_id, context.token["access_token"], {
+                        "task_type": "rewrite",
+                        "chat_id":   chat_id,
+                        "user_id":   user_id,
+                        "text":      new_text,
+                        "date_utc":  today,
+                    })
+                except Exception as e:
+                    logger.error(f"invoke_self_async failed: {e}", exc_info=True)
+                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
             else:
                 try:
                     datetime.strptime(parts[1], "%Y-%m-%d")
@@ -728,13 +736,17 @@ def handler(event, context):
                     tg_send(chat_id, f"Сообщение слишком длинное. Максимум {MAX_MESSAGE_LENGTH} символов.")
                     return {"statusCode": 200, "body": "ok"}
                 tg_send(chat_id, f"Считаю калории для {date_str}...")
-                invoke_self_async(context.function_id, context.token["access_token"], {
-                    "task_type": "rewrite",
-                    "chat_id":   chat_id,
-                    "user_id":   user_id,
-                    "text":      new_text,
-                    "date_utc":  date_str,
-                })
+                try:
+                    invoke_self_async(context.function_id, context.token["access_token"], {
+                        "task_type": "rewrite",
+                        "chat_id":   chat_id,
+                        "user_id":   user_id,
+                        "text":      new_text,
+                        "date_utc":  date_str,
+                    })
+                except Exception as e:
+                    logger.error(f"invoke_self_async failed: {e}", exc_info=True)
+                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
 
         else:
             # Сообщение с едой
@@ -748,13 +760,17 @@ def handler(event, context):
                 return {"statusCode": 200, "body": "ok"}
 
             tg_send(chat_id, "Считаю калории...")
-            invoke_self_async(context.function_id, context.token["access_token"], {
-                "task_type": "food",
-                "chat_id":   chat_id,
-                "user_id":   user_id,
-                "text":      text,
-                "date_utc":  date_utc,
-            })
+            try:
+                invoke_self_async(context.function_id, context.token["access_token"], {
+                    "task_type": "food",
+                    "chat_id":   chat_id,
+                    "user_id":   user_id,
+                    "text":      text,
+                    "date_utc":  date_utc,
+                })
+            except Exception as e:
+                logger.error(f"invoke_self_async failed: {e}", exc_info=True)
+                tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
 
         logger.info("=== WEBHOOK DONE ===")
         return {"statusCode": 200, "body": "ok"}
