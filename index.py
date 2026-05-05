@@ -659,7 +659,7 @@ def handler(event, context):
                     })
                 except Exception as e:
                     logger.error(f"invoke_self_async failed: {e}", exc_info=True)
-                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
+                    tg_send(chat_id, f"DBG: {type(e).__name__}: {str(e)[:300]}")
                 logger.info("=== WEBHOOK DONE (rewrite queued) ===")
                 return {"statusCode": 200, "body": "ok"}
 
@@ -735,7 +735,7 @@ def handler(event, context):
                     })
                 except Exception as e:
                     logger.error(f"invoke_self_async failed: {e}", exc_info=True)
-                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
+                    tg_send(chat_id, f"DBG: {type(e).__name__}: {str(e)[:300]}")
             else:
                 try:
                     datetime.strptime(parts[1], "%Y-%m-%d")
@@ -758,7 +758,7 @@ def handler(event, context):
                     })
                 except Exception as e:
                     logger.error(f"invoke_self_async failed: {e}", exc_info=True)
-                    tg_send(chat_id, "Не удалось запустить обработку. Попробуй ещё раз.")
+                    tg_send(chat_id, f"DBG: {type(e).__name__}: {str(e)[:300]}")
 
         else:
             # Сообщение с едой
