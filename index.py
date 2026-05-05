@@ -16,13 +16,11 @@ logger.setLevel(logging.INFO)
 # -- Конфиг ------------------------------------------------------------------
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_API     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# Секрет для верификации webhook — одна строка, задаётся при регистрации webhook
 WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "")
 
 AI_API_KEY       = os.getenv("YC_API_KEY")
 AI_AGENT_ID      = os.getenv("AI_AGENT_ID")
-AI_TIMEOUT       = 55   # секунд — максимум ждём ответа от AI
+AI_TIMEOUT       = 270   # секунд — воркер-вызов живёт до 300 сек, оставляем запас
 
 ai_client = openai.OpenAI(
     api_key=AI_API_KEY,
@@ -35,12 +33,11 @@ YDB_DATABASE = os.getenv("YDB_DATABASE")
 ALLOWED_USERS = set(
     int(x.strip()) for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()
 )
-
 MAX_REQUESTS_PER_DAY = int(os.getenv("MAX_REQUESTS_PER_DAY", "20"))
-MAX_MESSAGE_LENGTH   = 500   # символов — защита от длинных сообщений
-MAX_DAY_ENTRIES      = 20    # максимум записей в одном дне для /today и /day
+MAX_MESSAGE_LENGTH   = 500
+MAX_DAY_ENTRIES      = 20
 
-# -- YDB: singleton ----------------------------------------------------------
+# -- YDB singleton -----------------------------------------------------------
 _ydb_driver = None
 _ydb_pool   = None
 
@@ -95,7 +92,7 @@ def save_record(user_id: int, user_text: str, ai_json: str, totals: dict,
             "$record_id": record_id,
             "$ts":        int(now.timestamp()),
             "$date_utc":  date_utc,
-            "$user_text": user_text[:500],   # обрезаем на всякий случай
+            "$user_text": user_text[:500],
             "$ai_json":   ai_json,
             "$kcal":      float(totals.get("kcal", 0)),
             "$protein_g": float(totals.get("protein_g", 0)),
@@ -108,16 +105,11 @@ def save_record(user_id: int, user_text: str, ai_json: str, totals: dict,
 
 
 def delete_day(user_id: int, date_utc: str) -> int:
-    """Удаляет все записи пользователя за указанную дату одной транзакцией."""
     pool = _get_pool()
-
     rows = get_history(user_id, date_utc=date_utc)
     if not rows:
-        logger.info(f"delete_day: no records for user {user_id} date {date_utc}")
         return 0
-
     record_ids = [r["record_id"] for r in rows]
-    logger.info(f"delete_day: deleting {len(record_ids)} records for user {user_id} date {date_utc}")
 
     def _delete(session):
         tx = session.transaction()
@@ -128,14 +120,11 @@ def delete_day(user_id: int, date_utc: str) -> int:
             WHERE user_id = $user_id AND record_id = $record_id;
         """)
         for rid in record_ids:
-            tx.execute(prepared, {
-                "$user_id":   user_id,
-                "$record_id": rid,
-            })
+            tx.execute(prepared, {"$user_id": user_id, "$record_id": rid})
         tx.commit()
 
     pool.retry_operation_sync(_delete)
-    logger.info(f"delete_day: done, deleted {len(record_ids)} records")
+    logger.info(f"delete_day: deleted {len(record_ids)} records for user {user_id} date {date_utc}")
     return len(record_ids)
 
 
@@ -195,7 +184,6 @@ def get_history(user_id: int, date_utc: str = None, limit: int = 10) -> list:
 
 
 def count_today_requests(user_id: int, date_utc: str) -> int:
-    """Считает количество записей пользователя за сегодня."""
     rows = get_history(user_id, date_utc=date_utc, limit=MAX_REQUESTS_PER_DAY + 1)
     return len(rows)
 
@@ -252,9 +240,7 @@ def clear_pending_rewrite(user_id: int):
             DECLARE $user_id AS Int64;
             DELETE FROM pending_rewrite WHERE user_id = $user_id;
         """)
-        session.transaction().execute(prepared, {
-            "$user_id": user_id,
-        }, commit_tx=True)
+        session.transaction().execute(prepared, {"$user_id": user_id}, commit_tx=True)
     try:
         pool.retry_operation_sync(_delete)
     except Exception as e:
@@ -264,7 +250,6 @@ def clear_pending_rewrite(user_id: int):
 # -- AI ----------------------------------------------------------------------
 
 def validate_ai_response(data: dict) -> bool:
-    """Проверяет что ответ AI имеет ожидаемую структуру."""
     if not isinstance(data, dict):
         return False
     if "items" not in data or not isinstance(data["items"], list):
@@ -273,14 +258,12 @@ def validate_ai_response(data: dict) -> bool:
         return False
     if "total" not in data or not isinstance(data["total"], dict):
         return False
-    # Проверяем каждый item
     required_fields = {"name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g"}
     for item in data["items"]:
         if not isinstance(item, dict):
             return False
         if not required_fields.issubset(item.keys()):
             return False
-        # Проверяем числовые поля
         for field in ("weight_g", "kcal", "protein_g", "fat_g", "carb_g"):
             if not isinstance(item[field], (int, float)):
                 return False
@@ -288,7 +271,6 @@ def validate_ai_response(data: dict) -> bool:
 
 
 def call_ai(user_message: str) -> dict:
-    """Вызывает AI агента с таймаутом и валидацией ответа."""
     try:
         response = ai_client.responses.create(
             prompt={"id": AI_AGENT_ID},
@@ -302,7 +284,6 @@ def call_ai(user_message: str) -> dict:
     content = response.output_text.strip()
     logger.info(f"AI raw response: {content[:300]}")
 
-    # Убираем markdown-блоки если агент их добавил
     if content.startswith("```"):
         content = content.split("```")[1]
         if content.startswith("json"):
@@ -311,7 +292,7 @@ def call_ai(user_message: str) -> dict:
 
     try:
         data = json.loads(content)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         logger.error(f"JSON parse failed. Content: {content[:500]}")
         raise
 
@@ -322,10 +303,102 @@ def call_ai(user_message: str) -> dict:
     return data
 
 
+# -- Async self-invocation ---------------------------------------------------
+
+def invoke_self_async(function_id: str, iam_token: str, task: dict):
+    """Вызывает эту же функцию асинхронно с задачей AI.
+    Yandex Cloud возвращает 202 мгновенно, функция выполняется в фоне."""
+    resp = requests.post(
+        f"https://functions.yandexcloud.com/functions/{function_id}/invoke",
+        params={"integration": "async"},
+        headers={
+            "Authorization": f"Bearer {iam_token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps({"_async_task": task}, ensure_ascii=False),
+        timeout=10,
+    )
+    logger.info(f"Async self-invoke: HTTP {resp.status_code}")
+    if resp.status_code not in (200, 202):
+        logger.error(f"Async invoke failed: {resp.text[:200]}")
+        raise RuntimeError(f"Async invoke returned {resp.status_code}")
+
+
+# -- Async task handlers -----------------------------------------------------
+
+def process_food(chat_id: int, user_id: int, text: str, date_utc: str):
+    try:
+        data = call_ai(text)
+        logger.info(f"AI returned: {str(data)[:200]}")
+    except json.JSONDecodeError:
+        tg_send(chat_id, "Не смог распознать ответ от агента. Попробуй переформулировать.")
+        return
+    except ValueError:
+        tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
+        return
+    except Exception as e:
+        logger.error(f"AI error: {e}", exc_info=True)
+        tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+        return
+
+    tg_send(chat_id, format_ai_response(data))
+
+    try:
+        t = data.get("total", {})
+        save_record(
+            user_id=user_id,
+            user_text=text,
+            ai_json=json.dumps(data, ensure_ascii=False),
+            totals={
+                "kcal":      data.get("total_kcal", 0),
+                "protein_g": t.get("protein_g", 0),
+                "fat_g":     t.get("fat_g", 0),
+                "carb_g":    t.get("carb_g", 0),
+            },
+            date_utc=date_utc,
+        )
+    except Exception as e:
+        logger.error(f"YDB save error: {e}", exc_info=True)
+
+
+def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str):
+    try:
+        data = call_ai(text)
+    except json.JSONDecodeError:
+        tg_send(chat_id, "Не смог распознать ответ от агента. Попробуй переформулировать.")
+        return
+    except ValueError:
+        tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
+        return
+    except Exception as e:
+        logger.error(f"AI error in rewrite: {e}", exc_info=True)
+        tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+        return
+
+    deleted = delete_day(user_id, date_utc)
+    t = data.get("total", {})
+    save_record(
+        user_id=user_id,
+        user_text=text,
+        ai_json=json.dumps(data, ensure_ascii=False),
+        totals={
+            "kcal":      data.get("total_kcal", 0),
+            "protein_g": t.get("protein_g", 0),
+            "fat_g":     t.get("fat_g", 0),
+            "carb_g":    t.get("carb_g", 0),
+        },
+        date_utc=date_utc,
+    )
+    reply = format_ai_response(data)
+    note  = f"\n\n✏️ Рацион за {date_utc} обновлён"
+    if deleted > 0:
+        note += f" (удалено старых записей: {deleted})"
+    tg_send(chat_id, reply + note)
+
+
 # -- Telegram helpers --------------------------------------------------------
 
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown"):
-    # Telegram ограничивает сообщения 4096 символами
     if len(text) > 4000:
         text = text[:3990] + "\n...(обрезано)"
     requests.post(f"{TELEGRAM_API}/sendMessage", json={
@@ -376,7 +449,7 @@ def show_rewrite_keyboard(chat_id: int):
 def handle_rewrite_callback(chat_id: int, user_id: int,
                              callback_query_id: str, date_str: str):
     tg_answer_callback(callback_query_id)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     if date_str == today:
         label = f"сегодня ({date_str})"
@@ -464,117 +537,38 @@ def format_day_summary(title: str, rows: list) -> str:
     return "\n".join(lines)
 
 
-# -- Команды -----------------------------------------------------------------
-
-def handle_start(chat_id: int):
-    tg_send(chat_id, (
-        "Привет! Я помогу отслеживать калории.\n\n"
-        "Просто напиши что ел, например:\n"
-        "_«съел гречку 200г и куриную грудку 150г»_\n\n"
-        "*Команды:*\n"
-        "/today — сводка за сегодня\n"
-        "/history — последние 10 записей\n"
-        "/day 2026-05-01 — записи за конкретный день\n"
-        "/rewrite — переписать рацион (выбор даты кнопками)\n"
-        "/rewrite 2026-05-01 гречка 200г — переписать конкретный день"
-    ))
-
-
-def handle_today(chat_id: int, user_id: int):
-    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    rows = get_history(user_id, date_utc=date_utc)
-    if not rows:
-        tg_send(chat_id, "За сегодня записей нет. Расскажи что ел.")
-        return
-    tg_send(chat_id, format_day_summary(f"Сегодня, {date_utc}", rows))
-
-
-def handle_history(chat_id: int, user_id: int):
-    rows = get_history(user_id, limit=10)
-    if not rows:
-        tg_send(chat_id, "История пуста.")
-        return
-    lines = ["*Последние записи:*\n"]
-    for r in rows:
-        lines.append(format_log_entry(r))
-    tg_send(chat_id, "\n".join(lines))
-
-
-def handle_day(chat_id: int, user_id: int, date_str: str):
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        tg_send(chat_id, "Формат даты: ГГГГ-ММ-ДД, например /day 2026-05-01")
-        return
-    rows = get_history(user_id, date_utc=date_str)
-    if not rows:
-        tg_send(chat_id, f"За {date_str} записей нет.")
-        return
-    tg_send(chat_id, format_day_summary(date_str, rows))
-
-
-def handle_rewrite(chat_id: int, user_id: int, date_str: str, new_text: str):
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        tg_send(chat_id, "Формат: /rewrite ГГГГ-ММ-ДД что ел\nИли /rewrite что ел — за сегодня")
-        return
-
-    if not new_text.strip():
-        tg_send(chat_id, "Укажи что ел после даты.")
-        return
-
-    # Лимит длины и для rewrite тоже
-    if len(new_text) > MAX_MESSAGE_LENGTH:
-        tg_send(chat_id, f"Сообщение слишком длинное. Максимум {MAX_MESSAGE_LENGTH} символов.")
-        return
-
-    tg_send(chat_id, f"Считаю калории для {date_str}...")
-
-    try:
-        data = call_ai(new_text)
-    except json.JSONDecodeError:
-        tg_send(chat_id, "Не смог распознать ответ от агента. Попробуй переформулировать.")
-        return
-    except ValueError as e:
-        logger.error(f"AI validation error in rewrite: {e}")
-        tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
-        return
-    except Exception as e:
-        logger.error(f"AI error in rewrite: {e}", exc_info=True)
-        tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
-        return
-
-    deleted = delete_day(user_id, date_str)
-    t = data.get("total", {})
-    save_record(
-        user_id=user_id,
-        user_text=new_text,
-        ai_json=json.dumps(data, ensure_ascii=False),
-        totals={
-            "kcal":      data.get("total_kcal", 0),
-            "protein_g": t.get("protein_g", 0),
-            "fat_g":     t.get("fat_g", 0),
-            "carb_g":    t.get("carb_g", 0),
-        },
-        date_utc=date_str,
-    )
-    reply = format_ai_response(data)
-    note = f"\n\n✏️ Рацион за {date_str} обновлён"
-    if deleted > 0:
-        note += f" (удалено старых записей: {deleted})"
-    tg_send(chat_id, reply + note)
-
-
 # -- Основной handler --------------------------------------------------------
 
 def handler(event, context):
     try:
-        logger.info(f"=== START === event keys: {list(event.keys())}")
+        # ----------------------------------------------------------------
+        # Ветка 1: асинхронный самовызов — выполняем AI-задачу
+        # ----------------------------------------------------------------
+        async_task = event.get("_async_task")
+        if async_task:
+            logger.info(f"=== ASYNC TASK START === type={async_task.get('task_type')}")
+            task_type = async_task.get("task_type")
+            chat_id   = async_task["chat_id"]
+            user_id   = async_task["user_id"]
+            text      = async_task["text"]
+            date_utc  = async_task["date_utc"]
 
-        # -- Верификация webhook ---------------------------------------------
-        # Проверяем секретный токен который Telegram присылает в заголовке.
-        # Если WEBHOOK_SECRET задан — запросы без правильного токена отклоняем.
+            if task_type == "food":
+                process_food(chat_id, user_id, text, date_utc)
+            elif task_type == "rewrite":
+                process_rewrite(chat_id, user_id, text, date_utc)
+            else:
+                logger.warning(f"Unknown async task type: {task_type}")
+
+            logger.info("=== ASYNC TASK DONE ===")
+            return {"statusCode": 200, "body": "ok"}
+
+        # ----------------------------------------------------------------
+        # Ветка 2: обычный webhook от Telegram
+        # ----------------------------------------------------------------
+        logger.info(f"=== WEBHOOK START === event keys: {list(event.keys())}")
+
+        # Верификация webhook
         if WEBHOOK_SECRET:
             headers = event.get("headers") or {}
             incoming_secret = headers.get(
@@ -591,7 +585,7 @@ def handler(event, context):
 
         logger.info(f"body parsed: {str(body)[:200]}")
 
-        # -- Обработка inline-кнопок -----------------------------------------
+        # Обработка inline-кнопок
         callback_query = body.get("callback_query")
         if callback_query:
             cq_id   = callback_query["id"]
@@ -609,7 +603,6 @@ def handler(event, context):
 
             return {"statusCode": 200, "body": "ok"}
 
-        # -- Обычное сообщение -----------------------------------------------
         # edited_message игнорируем — не хотим дублировать записи
         message = body.get("message")
         if not message:
@@ -624,13 +617,13 @@ def handler(event, context):
         if not text:
             return {"statusCode": 200, "body": "ok"}
 
-        # -- Проверка whitelist ----------------------------------------------
+        # Проверка whitelist
         if ALLOWED_USERS and user_id not in ALLOWED_USERS:
             logger.info(f"Blocked user {user_id}")
             tg_send(chat_id, "Нет доступа.")
             return {"statusCode": 200, "body": "ok"}
 
-        # -- Лимит длины сообщения -------------------------------------------
+        # Лимит длины сообщения
         if not text.startswith("/") and len(text) > MAX_MESSAGE_LENGTH:
             tg_send(chat_id,
                 f"Сообщение слишком длинное. "
@@ -638,33 +631,71 @@ def handler(event, context):
             )
             return {"statusCode": 200, "body": "ok"}
 
-        # -- Проверка pending rewrite ----------------------------------------
+        # Проверка pending rewrite
         if not text.startswith("/"):
             pending_date = get_pending_rewrite(user_id)
             if pending_date:
                 clear_pending_rewrite(user_id)
-                handle_rewrite(chat_id, user_id, pending_date, text)
-                logger.info("=== DONE (pending rewrite) ===")
+                tg_send(chat_id, f"Считаю калории для {pending_date}...")
+                invoke_self_async(context.function_id, context.token["access_token"], {
+                    "task_type": "rewrite",
+                    "chat_id":   chat_id,
+                    "user_id":   user_id,
+                    "text":      text,
+                    "date_utc":  pending_date,
+                })
+                logger.info("=== WEBHOOK DONE (rewrite queued) ===")
                 return {"statusCode": 200, "body": "ok"}
 
-        # -- Роутинг команд --------------------------------------------------
+        # Роутинг команд
         if text.startswith("/start"):
-            handle_start(chat_id)
+            tg_send(chat_id, (
+                "Привет! Я помогу отслеживать калории.\n\n"
+                "Просто напиши что ел, например:\n"
+                "_«съел гречку 200г и куриную грудку 150г»_\n\n"
+                "*Команды:*\n"
+                "/today — сводка за сегодня\n"
+                "/history — последние 10 записей\n"
+                "/day 2026-05-01 — записи за конкретный день\n"
+                "/rewrite — переписать рацион (выбор даты кнопками)\n"
+                "/rewrite 2026-05-01 гречка 200г — переписать конкретный день"
+            ))
 
         elif text == "/cancel":
             clear_pending_rewrite(user_id)
             tg_send(chat_id, "Отменено.")
 
         elif text.startswith("/today"):
-            handle_today(chat_id, user_id)
+            date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            rows = get_history(user_id, date_utc=date_utc)
+            if not rows:
+                tg_send(chat_id, "За сегодня записей нет. Расскажи что ел.")
+            else:
+                tg_send(chat_id, format_day_summary(f"Сегодня, {date_utc}", rows))
 
         elif text.startswith("/history"):
-            handle_history(chat_id, user_id)
+            rows = get_history(user_id, limit=10)
+            if not rows:
+                tg_send(chat_id, "История пуста.")
+            else:
+                lines = ["*Последние записи:*\n"]
+                for r in rows:
+                    lines.append(format_log_entry(r))
+                tg_send(chat_id, "\n".join(lines))
 
         elif text.startswith("/day"):
             parts = text.split()
             date_str = parts[1] if len(parts) > 1 else ""
-            handle_day(chat_id, user_id, date_str)
+            try:
+                datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                tg_send(chat_id, "Формат даты: ГГГГ-ММ-ДД, например /day 2026-05-01")
+                return {"statusCode": 200, "body": "ok"}
+            rows = get_history(user_id, date_utc=date_str)
+            if not rows:
+                tg_send(chat_id, f"За {date_str} записей нет.")
+            else:
+                tg_send(chat_id, format_day_summary(date_str, rows))
 
         elif text.startswith("/rewrite"):
             parts = text.split(None, 2)
@@ -673,16 +704,40 @@ def handler(event, context):
             if len(parts) == 1:
                 show_rewrite_keyboard(chat_id)
             elif len(parts) == 2:
-                handle_rewrite(chat_id, user_id, today, parts[1])
+                new_text = parts[1]
+                if len(new_text) > MAX_MESSAGE_LENGTH:
+                    tg_send(chat_id, f"Сообщение слишком длинное. Максимум {MAX_MESSAGE_LENGTH} символов.")
+                    return {"statusCode": 200, "body": "ok"}
+                tg_send(chat_id, f"Считаю калории для {today}...")
+                invoke_self_async(context.function_id, context.token["access_token"], {
+                    "task_type": "rewrite",
+                    "chat_id":   chat_id,
+                    "user_id":   user_id,
+                    "text":      new_text,
+                    "date_utc":  today,
+                })
             else:
                 try:
                     datetime.strptime(parts[1], "%Y-%m-%d")
-                    handle_rewrite(chat_id, user_id, parts[1], parts[2])
+                    date_str = parts[1]
+                    new_text = parts[2]
                 except ValueError:
-                    handle_rewrite(chat_id, user_id, today, parts[1] + " " + parts[2])
+                    date_str = today
+                    new_text = parts[1] + " " + parts[2]
+                if len(new_text) > MAX_MESSAGE_LENGTH:
+                    tg_send(chat_id, f"Сообщение слишком длинное. Максимум {MAX_MESSAGE_LENGTH} символов.")
+                    return {"statusCode": 200, "body": "ok"}
+                tg_send(chat_id, f"Считаю калории для {date_str}...")
+                invoke_self_async(context.function_id, context.token["access_token"], {
+                    "task_type": "rewrite",
+                    "chat_id":   chat_id,
+                    "user_id":   user_id,
+                    "text":      new_text,
+                    "date_utc":  date_str,
+                })
 
         else:
-            # -- Сообщение с едой --------------------------------------------
+            # Сообщение с едой
             date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             count = count_today_requests(user_id, date_utc)
             if count >= MAX_REQUESTS_PER_DAY:
@@ -693,39 +748,15 @@ def handler(event, context):
                 return {"statusCode": 200, "body": "ok"}
 
             tg_send(chat_id, "Считаю калории...")
-            try:
-                data = call_ai(text)
-                logger.info(f"AI returned: {str(data)[:200]}")
-            except json.JSONDecodeError:
-                tg_send(chat_id, "Не смог распознать ответ от агента. Попробуй переформулировать.")
-                return {"statusCode": 200, "body": "ok"}
-            except ValueError:
-                tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
-                return {"statusCode": 200, "body": "ok"}
-            except Exception as e:
-                logger.error(f"AI error: {e}", exc_info=True)
-                tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
-                return {"statusCode": 200, "body": "ok"}
+            invoke_self_async(context.function_id, context.token["access_token"], {
+                "task_type": "food",
+                "chat_id":   chat_id,
+                "user_id":   user_id,
+                "text":      text,
+                "date_utc":  date_utc,
+            })
 
-            tg_send(chat_id, format_ai_response(data))
-
-            try:
-                t = data.get("total", {})
-                save_record(
-                    user_id=user_id,
-                    user_text=text,
-                    ai_json=json.dumps(data, ensure_ascii=False),
-                    totals={
-                        "kcal":      data.get("total_kcal", 0),
-                        "protein_g": t.get("protein_g", 0),
-                        "fat_g":     t.get("fat_g", 0),
-                        "carb_g":    t.get("carb_g", 0),
-                    },
-                )
-            except Exception as e:
-                logger.error(f"YDB save error: {e}", exc_info=True)
-
-        logger.info("=== DONE ===")
+        logger.info("=== WEBHOOK DONE ===")
         return {"statusCode": 200, "body": "ok"}
 
     except Exception as e:
