@@ -10,8 +10,8 @@ import ydb
 import ydb.iam
 
 # -- Логгер ------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
 # -- Конфиг ------------------------------------------------------------------
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
