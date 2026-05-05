@@ -118,7 +118,11 @@ CREATE TABLE pending_rewrite (
 
 1. Консоль → **IAM** → **Сервисные аккаунты** → **Создать**
 2. Имя: `calories-agent-sa`
-3. Роли: `ydb.editor` и `ai.editor`
+3. Роли:
+   - `ydb.editor` — для записи/чтения в YDB
+   - `ai.languageModels.user` — для вызова AI Studio агента
+
+> ⚠️ Сервисный аккаунт нужно **привязать к функции** (Cloud Functions → твоя функция → новая версия → поле "Сервисный аккаунт"). При каждом создании новой версии этот выбор нужно делать заново — он не наследуется.
 
 ---
 
@@ -296,6 +300,46 @@ chmod +x deploy.sh
 
 ---
 
+## Чек-лист после деплоя (если бот молчит)
+
+Если задеплоил, но бот ничего не отвечает — проверяй по списку:
+
+1. **Сервисный аккаунт привязан к актуальной версии функции?**
+   Cloud Functions → calories-bot → последняя версия → поле «Сервисный аккаунт». Должен стоять `calories-agent-sa`. **Это самая частая причина «тишины»** — каждая новая версия теряет SA если не указать его явно.
+
+2. **У сервисного аккаунта есть нужные роли?**
+   IAM → calories-agent-sa → Права доступа в каталоге. Должны быть:
+   - `ydb.editor`
+   - `ai.languageModels.user`
+
+3. **Все переменные окружения заполнены в актуальной версии?**
+   Cloud Functions → версия → Переменные окружения. Должны быть все 8: `TELEGRAM_TOKEN`, `YC_API_KEY`, `AI_AGENT_ID`, `YDB_ENDPOINT`, `YDB_DATABASE`, `ALLOWED_USERS`, `MAX_REQUESTS_PER_DAY`, `WEBHOOK_SECRET`.
+
+4. **YDB_ENDPOINT не содержит `?database=`?**
+   Если содержит — это две разные переменные, разнеси.
+
+5. **API Gateway указывает на правильную функцию?**
+   API Gateway → шлюз → спецификация → проверь `function_id` и `service_account_id`.
+
+6. **Webhook зарегистрирован с правильным секретом?**
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+   ```
+   Поле `url` должно совпадать с `GATEWAY_URL`. Поле `last_error_message` должно быть пусто или null.
+
+7. **Логи показывают вызов?**
+   Cloud Logging → группа default. Должны быть строки `=== START ===` от твоего user_id.
+   Если пусто — webhook не приходит до функции (проверь Gateway/секрет).
+   Если есть, но без `[INFO]` — где-то ошибка в самом начале (см. логи).
+
+8. **AI Studio API ключ актуален?**
+   AI Studio → API-ключи. Если истёк — пересоздай и обнови `YC_API_KEY` в переменных функции (создаст новую версию — не забудь снова привязать SA).
+
+9. **YDB-таблицы созданы?**
+   YDB → твоя БД → Навигация → должны быть `calories_log` и `pending_rewrite`.
+
+---
+
 ## Полезные команды
 
 ```bash
@@ -323,6 +367,6 @@ yc serverless function version list --function-name calories-bot
 |---|---|---|
 | Cloud Functions | 1 млн вызовов/мес | 0 ₽ |
 | Serverless YDB | 1 млн RU/мес | 0 ₽ |
-| AI Studio (Gemma) | preview бесплатно | 0 ₽ |
+| AI Studio | зависит от модели | до ~50 ₽ |
 | API Gateway | 1 млн запросов/мес | 0 ₽ |
 | **Итого** | | **0 ₽/мес** |
