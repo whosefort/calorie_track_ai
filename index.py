@@ -380,9 +380,36 @@ def validate_ai_response(data: dict) -> bool:
     return True
 
 
-def call_ai(user_message: str) -> dict:
-    """Вызывает Yandex AI Studio агента и парсит JSON-ответ."""
-    logger.info(f"AI call: {user_message[:80]!r}")
+def _extract_json(raw: str) -> str:
+    """Извлекает JSON-строку из сырого ответа модели.
+    Обрабатывает: чистый JSON, ```json...```, текст до/после объекта."""
+    content = raw.strip()
+
+    # Убираем ```json ... ``` блоки
+    if "```" in content:
+        parts = content.split("```")
+        if len(parts) >= 3:
+            block = parts[1]
+            if block.startswith("json"):
+                block = block[4:]
+            content = block.strip()
+        else:
+            content = content.replace("```json", "").replace("```", "").strip()
+
+    # Если есть текст до/после JSON — вырезаем объект
+    if not content.startswith("{"):
+        start = content.find("{")
+        end   = content.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            content = content[start:end + 1]
+        else:
+            raise json.JSONDecodeError("no JSON object found", content, 0)
+
+    return content
+
+
+def _call_ai_once(user_message: str) -> dict:
+    """Один вызов AI без ретрая. Возбуждает JSONDecodeError или ValueError."""
     response = ai_client.responses.create(
         prompt={"id": AI_AGENT_ID},
         input=user_message,
@@ -391,30 +418,11 @@ def call_ai(user_message: str) -> dict:
     raw = response.output_text
     logger.info(f"AI raw ({len(raw)} chars): {raw[:600]}")
 
-    content = raw.strip()
-
-    # Шаг 1: убираем ```json ... ``` блоки
-    if "```" in content:
-        parts = content.split("```")
-        # parts[1] — содержимое первого блока
-        if len(parts) >= 3:
-            block = parts[1]
-            if block.startswith("json"):
-                block = block[4:]
-            content = block.strip()
-        else:
-            # нечётное число ``` — просто убираем их
-            content = content.replace("```json", "").replace("```", "").strip()
-
-    # Шаг 2: если модель добавила текст до/после JSON — вырезаем объект
-    if not content.startswith("{"):
-        start = content.find("{")
-        end   = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            content = content[start:end + 1]
-        else:
-            logger.error(f"AI: не удалось найти JSON-объект в ответе: {content[:400]}")
-            raise json.JSONDecodeError("no JSON object found", content, 0)
+    try:
+        content = _extract_json(raw)
+    except json.JSONDecodeError:
+        logger.error(f"AI: JSON не найден в ответе: {raw[:500]}")
+        raise
 
     try:
         data = json.loads(content)
@@ -423,7 +431,6 @@ def call_ai(user_message: str) -> dict:
         raise
 
     if not validate_ai_response(data):
-        # Логируем полную структуру, чтобы понять что именно не так
         try:
             full = json.dumps(data, ensure_ascii=False)
         except Exception:
@@ -432,6 +439,23 @@ def call_ai(user_message: str) -> dict:
         raise ValueError("AI response invalid")
 
     return data
+
+
+# Префикс для ретрая — явно требует чистый JSON
+_RETRY_PREFIX = (
+    "ВАЖНО: твой ответ должен содержать ТОЛЬКО валидный JSON-объект. "
+    "Никакого текста до или после. Никаких пояснений. Только JSON.\n\n"
+)
+
+def call_ai(user_message: str) -> dict:
+    """Вызывает AI агента с автоматическим ретраем при ошибке парсинга."""
+    logger.info(f"AI call: {user_message[:80]!r}")
+    try:
+        return _call_ai_once(user_message)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"AI attempt 1 failed ({type(e).__name__}), retrying with explicit JSON prompt")
+        # На ретрае явно напоминаем модели про JSON-only формат
+        return _call_ai_once(_RETRY_PREFIX + user_message)
 
 
 # ============================================================================
