@@ -528,7 +528,32 @@ def call_ai(user_message: str) -> dict:
 # TELEGRAM
 # ============================================================================
 
-def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown") -> None:
+# ---------------------------------------------------------------------------
+# Постоянная Reply-клавиатура (всегда видна внизу чата)
+# ---------------------------------------------------------------------------
+
+BTN_ADD      = "➕ Добавить"       # выбор приёма через inline-кнопки
+BTN_DAY_LOG  = "📝 Весь день"      # записать полный рацион за сегодня
+BTN_TODAY    = "📊 Сегодня"        # сводка за сегодня
+BTN_HISTORY  = "📋 История"        # последние 10 записей
+BTN_REWRITE  = "✏️ Переписать"     # переписать рацион за выбранный день
+
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [BTN_ADD,    BTN_DAY_LOG],
+        [BTN_TODAY,  BTN_HISTORY],
+        [BTN_REWRITE],
+    ],
+    "resize_keyboard": True,
+    "is_persistent":   True,   # клавиатура остаётся видимой между сообщениями
+}
+
+# Все тексты кнопок — для маршрутизации в route_message
+_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE}
+
+
+def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown",
+            reply_markup: dict = None) -> None:
     """Шлёт сообщение в Telegram. При ошибке Markdown — автоматический
     fallback на plain text, чтобы пользователь точно получил ответ."""
     if len(text) > 4000:
@@ -537,16 +562,19 @@ def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown") -> None:
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     try:
         r = requests.post(f"{TELEGRAM_API}/sendMessage",
                           json=payload, timeout=TG_TIMEOUT)
         if r.status_code == 400 and parse_mode:
-            # Скорее всего, проблема с парсингом markdown. Шлём plain.
             logger.warning(f"TG 400 with markdown, retry plain: {r.text[:200]}")
+            plain_payload = {"chat_id": chat_id, "text": text}
+            if reply_markup:
+                plain_payload["reply_markup"] = reply_markup
             r2 = requests.post(f"{TELEGRAM_API}/sendMessage",
-                               json={"chat_id": chat_id, "text": text},
-                               timeout=TG_TIMEOUT)
+                               json=plain_payload, timeout=TG_TIMEOUT)
             if not r2.ok:
                 logger.error(f"TG plain retry failed: {r2.status_code} {r2.text[:200]}")
         elif not r.ok:
@@ -555,7 +583,13 @@ def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown") -> None:
         logger.error(f"TG send exception: {e}")
 
 
+def tg_send_mk(chat_id: int, text: str, parse_mode: str = "Markdown") -> None:
+    """Шлёт сообщение с постоянной главной клавиатурой."""
+    tg_send(chat_id, text, parse_mode=parse_mode, reply_markup=MAIN_KEYBOARD)
+
+
 def tg_send_keyboard(chat_id: int, text: str, buttons: list) -> None:
+    """Шлёт сообщение с inline-клавиатурой (для выбора из вариантов)."""
     payload = {
         "chat_id":      chat_id,
         "text":         text,
@@ -840,17 +874,17 @@ def process_food_message(chat_id: int, user_id: int, text: str,
     try:
         data = call_ai(ai_input)
     except json.JSONDecodeError:
-        tg_send(chat_id, "Не смог распознать ответ агента. Переформулируй.")
+        tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
         return
     except ValueError:
-        tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
+        tg_send_mk(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
         return
     except Exception as e:
         logger.error(f"AI error: {e}", exc_info=True)
-        tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+        tg_send_mk(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
         return
 
-    tg_send(chat_id, format_ai_response(data))
+    tg_send_mk(chat_id, format_ai_response(data))
 
     try:
         t = data.get("total", {})
@@ -868,7 +902,7 @@ def process_food_message(chat_id: int, user_id: int, text: str,
         )
     except Exception as e:
         logger.error(f"YDB save error: {e}", exc_info=True)
-        tg_send(chat_id, "⚠️ Посчитал, но не смог сохранить в историю.")
+        tg_send_mk(chat_id, "⚠️ Посчитал, но не смог сохранить в историю.")
 
 
 def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> None:
@@ -882,14 +916,14 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
     try:
         data = call_ai(text)
     except json.JSONDecodeError:
-        tg_send(chat_id, "Не смог распознать ответ агента. Переформулируй.")
+        tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
         return
     except ValueError:
-        tg_send(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
+        tg_send_mk(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
         return
     except Exception as e:
         logger.error(f"AI error in rewrite: {e}", exc_info=True)
-        tg_send(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+        tg_send_mk(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
         return
 
     try:
@@ -909,13 +943,13 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
         )
     except Exception as e:
         logger.error(f"YDB rewrite error: {e}", exc_info=True)
-        tg_send(chat_id, "⚠️ Посчитал, но не смог переписать в БД.")
+        tg_send_mk(chat_id, "⚠️ Посчитал, но не смог переписать в БД.")
         return
 
     note = f"\n\n✏️ Рацион за {date_utc} обновлён"
     if deleted > 0:
         note += f" (удалено старых записей: {deleted})"
-    tg_send(chat_id, format_ai_response(data) + note)
+    tg_send_mk(chat_id, format_ai_response(data) + note)
 
 
 # ============================================================================
@@ -923,18 +957,17 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
 # ============================================================================
 
 def handle_start(chat_id: int) -> None:
-    tg_send(chat_id, (
+    tg_send_mk(chat_id, (
         "Привет! Я помогу отслеживать калории.\n\n"
-        "Просто напиши что ел, например:\n"
+        "Используй кнопки внизу или просто напиши что ел:\n"
         "_«съел гречку 200г и куриную грудку 150г»_\n\n"
-        "*Команды:*\n"
-        "/add — добавить приём пищи (завтрак / обед / ужин / перекус)\n"
-        "/today — сводка за сегодня\n"
-        "/history — последние 10 записей\n"
-        "/day 2026-05-01 — записи за конкретный день\n"
-        "/rewrite — переписать рацион (выбор даты кнопками)\n"
-        "/rewrite 2026-05-01 гречка 200г — переписать конкретный день\n"
-        "/cancel — отменить ожидающее действие"
+        "*Кнопки:*\n"
+        "➕ *Добавить* — один приём пищи (завтрак/обед/ужин/перекус)\n"
+        "📝 *Весь день* — записать всё что ел сегодня одним сообщением\n"
+        "📊 *Сегодня* — сводка за сегодня\n"
+        "📋 *История* — последние 10 записей\n"
+        "✏️ *Переписать* — исправить рацион за выбранный день\n\n"
+        "_/cancel — отменить ожидающее действие_"
     ))
 
 
@@ -942,31 +975,31 @@ def handle_today(chat_id: int, user_id: int) -> None:
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rows = get_history(user_id, date_utc=date_utc)
     if not rows:
-        tg_send(chat_id, "За сегодня записей нет. Расскажи что ел.")
+        tg_send_mk(chat_id, "За сегодня записей нет. Расскажи что ел.")
     else:
-        tg_send(chat_id, format_day_summary(f"Сегодня, {date_utc}", rows))
+        tg_send_mk(chat_id, format_day_summary(f"Сегодня, {date_utc}", rows))
 
 
 def handle_history(chat_id: int, user_id: int) -> None:
     rows = get_history(user_id, limit=10)
     if not rows:
-        tg_send(chat_id, "История пуста.")
+        tg_send_mk(chat_id, "История пуста.")
     else:
         lines = ["*Последние записи:*\n"] + [format_log_entry(r) for r in rows]
-        tg_send(chat_id, "\n".join(lines))
+        tg_send_mk(chat_id, "\n".join(lines))
 
 
 def handle_day(chat_id: int, user_id: int, date_str: str) -> None:
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
-        tg_send(chat_id, "Формат даты: ГГГГ-ММ-ДД, например /day 2026-05-01")
+        tg_send_mk(chat_id, "Формат даты: ГГГГ-ММ-ДД, например /day 2026-05-01")
         return
     rows = get_history(user_id, date_utc=date_str)
     if not rows:
-        tg_send(chat_id, f"За {date_str} записей нет.")
+        tg_send_mk(chat_id, f"За {date_str} записей нет.")
     else:
-        tg_send(chat_id, format_day_summary(date_str, rows))
+        tg_send_mk(chat_id, format_day_summary(date_str, rows))
 
 
 # ============================================================================
@@ -1004,7 +1037,41 @@ def route_message(message: dict) -> None:
                          f"(у тебя {len(text)}).")
         return
 
-    # Pending-состояния: rewrite и add_meal
+    # ── Кнопки главной клавиатуры ─────────────────────────────────────────
+    # Проверяем ДО pending-состояний: если пользователь нажал кнопку меню
+    # пока ждали ввода — выполняем действие кнопки, pending сбрасывается.
+    if text in _BUTTON_TEXTS:
+        # Кнопки всегда сбрасывают оба pending-состояния
+        clear_pending_rewrite(user_id)
+        clear_pending_meal(user_id)
+
+        if text == BTN_ADD:
+            show_add_keyboard(chat_id)
+            return
+
+        if text == BTN_DAY_LOG:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            save_pending_rewrite(user_id, today)
+            tg_send_mk(chat_id,
+                "Напиши всё что ел сегодня одним сообщением — "
+                "я запишу как дневной рацион и заменю старые данные.\n\n"
+                "_Или нажми «✏️ Переписать» чтобы выбрать другой день_"
+            )
+            return
+
+        if text == BTN_TODAY:
+            handle_today(chat_id, user_id)
+            return
+
+        if text == BTN_HISTORY:
+            handle_history(chat_id, user_id)
+            return
+
+        if text == BTN_REWRITE:
+            show_rewrite_keyboard(chat_id)
+            return
+
+    # ── Pending-состояния ─────────────────────────────────────────────────
     if not text.startswith("/"):
         # Rewrite имеет приоритет (явное действие пользователя)
         pending_date = get_pending_rewrite(user_id)
@@ -1020,7 +1087,7 @@ def route_message(message: dict) -> None:
             process_food_message(chat_id, user_id, text, meal_type=pending_meal)
             return
 
-    # Команды
+    # ── Команды ───────────────────────────────────────────────────────────
     if text.startswith("/start"):
         handle_start(chat_id)
         return
@@ -1028,11 +1095,10 @@ def route_message(message: dict) -> None:
     if text == "/cancel":
         clear_pending_rewrite(user_id)
         clear_pending_meal(user_id)
-        tg_send(chat_id, "Отменено.")
+        tg_send_mk(chat_id, "Отменено.")
         return
 
     if text.startswith("/add"):
-        # Сбрасываем rewrite-ожидание если было, показываем меню приёмов пищи
         clear_pending_rewrite(user_id)
         show_add_keyboard(chat_id)
         return
