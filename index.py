@@ -322,6 +322,72 @@ def clear_pending_rewrite(user_id: int) -> None:
         logger.error(f"clear_pending_rewrite: {e}")
 
 
+# ---------------------------------------------------------------------------
+# pending_meal — временное состояние выбранного приёма пищи через /add
+# TTL: 10 минут (600 сек)
+# ---------------------------------------------------------------------------
+
+_PENDING_MEAL_TTL = 600  # секунд
+
+
+def save_pending_meal(user_id: int, meal_type: str) -> None:
+    pool = _get_pool()
+    def _upsert(session):
+        prepared = session.prepare("""
+            DECLARE $user_id   AS Int64;
+            DECLARE $meal_type AS Utf8;
+            DECLARE $ts        AS Int64;
+            UPSERT INTO pending_meal (user_id, meal_type, ts)
+            VALUES ($user_id, $meal_type, $ts);
+        """)
+        session.transaction().execute(prepared, {
+            "$user_id":   user_id,
+            "$meal_type": meal_type,
+            "$ts":        int(datetime.now(timezone.utc).timestamp()),
+        }, commit_tx=True)
+    try:
+        pool.retry_operation_sync(_upsert)
+    except Exception as e:
+        logger.error(f"save_pending_meal: {e}")
+
+
+def get_pending_meal(user_id: int):
+    """Возвращает meal_type если есть активный pending (< 10 мин), иначе None."""
+    pool = _get_pool()
+    def _select(session):
+        prepared = session.prepare("""
+            DECLARE $user_id AS Int64;
+            DECLARE $min_ts  AS Int64;
+            SELECT meal_type FROM pending_meal
+            WHERE user_id = $user_id AND ts > $min_ts;
+        """)
+        return session.transaction().execute(prepared, {
+            "$user_id": user_id,
+            "$min_ts":  int(datetime.now(timezone.utc).timestamp()) - _PENDING_MEAL_TTL,
+        }, commit_tx=True)
+    try:
+        rs = pool.retry_operation_sync(_select)
+        rows = rs[0].rows
+        return rows[0].meal_type if rows else None
+    except Exception as e:
+        logger.error(f"get_pending_meal: {e}")
+        return None
+
+
+def clear_pending_meal(user_id: int) -> None:
+    pool = _get_pool()
+    def _delete(session):
+        prepared = session.prepare("""
+            DECLARE $user_id AS Int64;
+            DELETE FROM pending_meal WHERE user_id = $user_id;
+        """)
+        session.transaction().execute(prepared, {"$user_id": user_id}, commit_tx=True)
+    try:
+        pool.retry_operation_sync(_delete)
+    except Exception as e:
+        logger.error(f"clear_pending_meal: {e}")
+
+
 # ============================================================================
 # AI
 # ============================================================================
@@ -553,6 +619,35 @@ def handle_rewrite_callback(chat_id: int, user_id: int,
     save_pending_rewrite(user_id, date_str)
 
 
+def show_add_keyboard(chat_id: int) -> None:
+    """Показывает клавиатуру выбора приёма пищи для /add."""
+    buttons = [
+        [
+            {"text": "🌅 Завтрак", "callback_data": "add_meal:breakfast"},
+            {"text": "☀️ Обед",   "callback_data": "add_meal:lunch"},
+        ],
+        [
+            {"text": "🌙 Ужин",   "callback_data": "add_meal:dinner"},
+            {"text": "🍎 Перекус","callback_data": "add_meal:snack"},
+        ],
+    ]
+    tg_send_keyboard(chat_id, "Выбери приём пищи:", buttons)
+
+
+def handle_add_meal_callback(chat_id: int, user_id: int,
+                             callback_query_id: str, meal_type: str) -> None:
+    """Обрабатывает нажатие кнопки приёма пищи — сохраняет pending и просит текст."""
+    tg_answer_callback(callback_query_id)
+    if meal_type not in MEAL_AI_PREFIX:
+        logger.warning(f"unknown meal_type in callback: {meal_type!r}")
+        return
+    # Сбрасываем rewrite-ожидание если было
+    clear_pending_rewrite(user_id)
+    save_pending_meal(user_id, meal_type)
+    prompt = MEAL_PROMPT_TEXT.get(meal_type, "Пиши что ел:")
+    tg_send(chat_id, f"{prompt}\n\n_Или /cancel чтобы отменить_")
+
+
 # ============================================================================
 # ФОРМАТИРОВАНИЕ
 # ============================================================================
@@ -565,6 +660,23 @@ MEAL_LABELS = {
     None:        "🍽 Прочее",
 }
 MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack", None]
+
+# Префикс, который prepend'ится к запросу пользователя чтобы AI
+# проставил нужный meal_type всем items
+MEAL_AI_PREFIX = {
+    "breakfast": "Это завтрак. ",
+    "lunch":     "Это обед. ",
+    "dinner":    "Это ужин. ",
+    "snack":     "Это перекус. ",
+}
+
+# Сообщение-подсказка для каждого приёма после нажатия кнопки
+MEAL_PROMPT_TEXT = {
+    "breakfast": "Пиши что ел на *завтрак* 🌅",
+    "lunch":     "Пиши что ел на *обед* ☀️",
+    "dinner":    "Пиши что ел на *ужин* 🌙",
+    "snack":     "Пиши что ел на *перекус* 🍎",
+}
 
 _DIVIDER = "─" * 22
 
@@ -692,8 +804,14 @@ def format_day_summary(title: str, rows: list) -> str:
 # БИЗНЕС-ЛОГИКА: подсчёт и перезапись
 # ============================================================================
 
-def process_food_message(chat_id: int, user_id: int, text: str) -> None:
-    """Считает калории нового приёма пищи и сохраняет в БД."""
+def process_food_message(chat_id: int, user_id: int, text: str,
+                         meal_type: str = None) -> None:
+    """Считает калории нового приёма пищи и сохраняет в БД.
+
+    meal_type — если передан, prepend'ится к AI-запросу чтобы все items
+    получили нужный meal_type. Передаётся когда пользователь выбрал приём
+    через /add.
+    """
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Лимит запросов
@@ -713,8 +831,14 @@ def process_food_message(chat_id: int, user_id: int, text: str) -> None:
 
     tg_send(chat_id, "Считаю калории...")
 
+    # Добавляем контекст приёма пищи к запросу если выбран через /add
+    ai_input = text
+    if meal_type and meal_type in MEAL_AI_PREFIX:
+        ai_input = MEAL_AI_PREFIX[meal_type] + text
+        logger.info(f"meal_type hint: {meal_type!r}")
+
     try:
-        data = call_ai(text)
+        data = call_ai(ai_input)
     except json.JSONDecodeError:
         tg_send(chat_id, "Не смог распознать ответ агента. Переформулируй.")
         return
@@ -804,11 +928,13 @@ def handle_start(chat_id: int) -> None:
         "Просто напиши что ел, например:\n"
         "_«съел гречку 200г и куриную грудку 150г»_\n\n"
         "*Команды:*\n"
+        "/add — добавить приём пищи (завтрак / обед / ужин / перекус)\n"
         "/today — сводка за сегодня\n"
         "/history — последние 10 записей\n"
         "/day 2026-05-01 — записи за конкретный день\n"
         "/rewrite — переписать рацион (выбор даты кнопками)\n"
-        "/rewrite 2026-05-01 гречка 200г — переписать конкретный день"
+        "/rewrite 2026-05-01 гречка 200г — переписать конкретный день\n"
+        "/cancel — отменить ожидающее действие"
     ))
 
 
@@ -878,12 +1004,20 @@ def route_message(message: dict) -> None:
                          f"(у тебя {len(text)}).")
         return
 
-    # Pending rewrite — следующий обычный текст идёт на перезапись
+    # Pending-состояния: rewrite и add_meal
     if not text.startswith("/"):
+        # Rewrite имеет приоритет (явное действие пользователя)
         pending_date = get_pending_rewrite(user_id)
         if pending_date:
             clear_pending_rewrite(user_id)
             process_rewrite(chat_id, user_id, text, pending_date)
+            return
+
+        # Если был выбран приём пищи через /add
+        pending_meal = get_pending_meal(user_id)
+        if pending_meal:
+            clear_pending_meal(user_id)
+            process_food_message(chat_id, user_id, text, meal_type=pending_meal)
             return
 
     # Команды
@@ -893,7 +1027,14 @@ def route_message(message: dict) -> None:
 
     if text == "/cancel":
         clear_pending_rewrite(user_id)
+        clear_pending_meal(user_id)
         tg_send(chat_id, "Отменено.")
+        return
+
+    if text.startswith("/add"):
+        # Сбрасываем rewrite-ожидание если было, показываем меню приёмов пищи
+        clear_pending_rewrite(user_id)
+        show_add_keyboard(chat_id)
         return
 
     if text.startswith("/today"):
@@ -961,6 +1102,8 @@ def handler(event, context):
 
             if data.startswith("rewrite_date:"):
                 handle_rewrite_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
+            elif data.startswith("add_meal:"):
+                handle_add_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
             return {"statusCode": 200, "body": "ok"}
 
         # Обычное сообщение (edited_message игнорируем — избегаем дублей)
