@@ -566,46 +566,108 @@ MEAL_LABELS = {
 }
 MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack", None]
 
+_DIVIDER = "─" * 22
+
+
+def _fmt(v) -> str:
+    """Форматирует число: убирает лишние .0  (650.0 → '650', 13.5 → '13.5')."""
+    try:
+        f = float(v)
+        return str(int(f)) if f == int(f) else f"{f:.1f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _macros_line(kcal, protein_g, fat_g, carb_g) -> str:
+    return (
+        f"{_fmt(kcal)} ккал  "
+        f"Б {_fmt(protein_g)}  "
+        f"Ж {_fmt(fat_g)}  "
+        f"У {_fmt(carb_g)}"
+    )
+
 
 def format_log_entry(entry: dict) -> str:
     return (
-        f"*{entry['date_utc']}*  •  {entry['kcal']:.0f} ккал\n"
-        f"  Б {entry['protein_g']:.1f}г  "
-        f"Ж {entry['fat_g']:.1f}г  "
-        f"У {entry['carb_g']:.1f}г\n"
+        f"*{entry['date_utc']}*  •  {_fmt(entry['kcal'])} ккал\n"
+        f"  Б {_fmt(entry['protein_g'])}  "
+        f"Ж {_fmt(entry['fat_g'])}  "
+        f"У {_fmt(entry['carb_g'])}\n"
         f"  _{entry['user_text'][:60]}_"
     )
 
 
 def format_ai_response(data: dict) -> str:
-    groups = {}
+    """Форматирует ответ AI в читаемое сообщение для Telegram.
+
+    Формат:
+        🌅 Завтрак — 535 ккал
+        ──────────────────────
+        Ролл с омлетом · 150г
+        375 ккал  Б 12  Ж 18  У 40
+
+        ☀️ Обед — 2620 ккал
+        ...
+
+        📊 Итого: 3155 ккал
+        Б 137  Ж 143  У 341
+
+        💡 tip
+    """
+    groups: dict = {}
     for item in data.get("items", []):
         groups.setdefault(item.get("meal_type"), []).append(item)
 
-    lines = ["*Подсчитано:*\n"]
+    lines = []
+
     for meal in MEAL_ORDER:
         if meal not in groups:
             continue
-        lines.append(f"\n{MEAL_LABELS[meal]}")
-        for item in groups[meal]:
-            portion = f"{item['weight_g']}г"
-            if item.get("portion_note"):
-                portion += f" ({item['portion_note']})"
-            lines.append(
-                f"• *{item['name']}* {portion}\n"
-                f"  {item['kcal']} ккал  |  "
-                f"Б {item['protein_g']}г  Ж {item['fat_g']}г  У {item['carb_g']}г"
-            )
+        items = groups[meal]
 
+        # Итого по приёму пищи
+        meal_kcal = sum(float(i.get("kcal", 0)) for i in items)
+        lines.append(f"*{MEAL_LABELS[meal]} — {_fmt(meal_kcal)} ккал*")
+        lines.append(_DIVIDER)
+
+        for item in items:
+            # Имя: убираем * (маркер оценённой порции) — он нужен для логики,
+            # не для отображения; * в Markdown-тексте сломает форматирование.
+            raw_name = item.get("name", "")
+            estimated = "*" in raw_name
+            display_name = raw_name.replace("*", "").strip()
+
+            weight_line = f"{display_name} · {_fmt(item.get('weight_g', 0))}г"
+            # Заметка о порции — только для оценённых (был *)
+            if estimated and item.get("portion_note"):
+                weight_line += f"  _({item['portion_note']})_"
+
+            lines.append(weight_line)
+            lines.append(_macros_line(
+                item.get("kcal", 0),
+                item.get("protein_g", 0),
+                item.get("fat_g", 0),
+                item.get("carb_g", 0),
+            ))
+            lines.append("")  # пустая строка между блюдами
+
+        # Убираем лишнюю пустую строку в конце группы
+        if lines and lines[-1] == "":
+            lines.pop()
+        lines.append("")  # отступ между приёмами пищи
+
+    # Итого за день
     t = data.get("total", {})
     lines.append(
-        f"\n*Итого: {data.get('total_kcal', 0)} ккал*\n"
-        f"Б {t.get('protein_g', 0)}г  |  "
-        f"Ж {t.get('fat_g', 0)}г  |  "
-        f"У {t.get('carb_g', 0)}г"
+        f"*📊 Итого: {_fmt(data.get('total_kcal', 0))} ккал*\n"
+        f"Б {_fmt(t.get('protein_g', 0))}  "
+        f"Ж {_fmt(t.get('fat_g', 0))}  "
+        f"У {_fmt(t.get('carb_g', 0))}"
     )
+
     if data.get("tip"):
         lines.append(f"\n💡 {data['tip']}")
+
     return "\n".join(lines)
 
 
@@ -620,8 +682,8 @@ def format_day_summary(title: str, rows: list) -> str:
     if len(rows) >= MAX_DAY_ENTRIES:
         lines.append(f"\n_Показаны первые {MAX_DAY_ENTRIES} записей_")
     lines.append(
-        f"\n*Итого:* {total_k:.0f} ккал | "
-        f"Б {total_p:.1f}г | Ж {total_f:.1f}г | У {total_c:.1f}г"
+        f"\n*Итого:* {_fmt(total_k)} ккал  "
+        f"Б {_fmt(total_p)}  Ж {_fmt(total_f)}  У {_fmt(total_c)}"
     )
     return "\n".join(lines)
 
