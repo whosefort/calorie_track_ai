@@ -714,6 +714,14 @@ MEAL_PROMPT_TEXT = {
 
 _DIVIDER = "─" * 22
 
+# Русские названия для человекочитаемых дат
+_MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+_WEEKDAYS_RU = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
+
 
 def _fmt(v) -> str:
     """Форматирует число: убирает лишние .0  (650.0 → '650', 13.5 → '13.5')."""
@@ -722,6 +730,33 @@ def _fmt(v) -> str:
         return str(int(f)) if f == int(f) else f"{f:.1f}"
     except (TypeError, ValueError):
         return str(v)
+
+
+def _truncate(text: str, limit: int = 70) -> str:
+    """Обрезает текст по границе слова, добавляет … если обрезано."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return (cut or text[:limit]) + "…"
+
+
+def _friendly_date(date_str: str) -> str:
+    """'2026-05-29' → 'Сегодня · 29 мая' / 'Вчера · 28 мая' / 'Ср · 27 мая'."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return date_str
+    today = datetime.now(timezone.utc).date()
+    delta = (today - d).days
+    day_month = f"{d.day} {_MONTHS_RU.get(d.month, '')}"
+    if delta == 0:
+        prefix = "Сегодня"
+    elif delta == 1:
+        prefix = "Вчера"
+    else:
+        prefix = _WEEKDAYS_RU.get(d.weekday(), "")
+    return f"{prefix} · {day_month}" if prefix else day_month
 
 
 def _macros_line(kcal, protein_g, fat_g, carb_g) -> str:
@@ -733,14 +768,18 @@ def _macros_line(kcal, protein_g, fat_g, carb_g) -> str:
     )
 
 
-def format_log_entry(entry: dict) -> str:
-    return (
-        f"*{entry['date_utc']}*  •  {_fmt(entry['kcal'])} ккал\n"
-        f"  Б {_fmt(entry['protein_g'])}  "
-        f"Ж {_fmt(entry['fat_g'])}  "
-        f"У {_fmt(entry['carb_g'])}\n"
-        f"  _{entry['user_text'][:60]}_"
-    )
+def _macros_compact(protein_g, fat_g, carb_g) -> str:
+    """Компактная строка БЖУ: 'Б 32 · Ж 29 · У 50'."""
+    return f"Б {_fmt(protein_g)} · Ж {_fmt(fat_g)} · У {_fmt(carb_g)}"
+
+
+def format_log_entry(entry: dict, show_date: bool = True) -> str:
+    """Карточка одной записи. show_date=False когда дата уже в заголовке дня."""
+    head = f"{_fmt(entry['kcal'])} ккал · {_macros_compact(entry['protein_g'], entry['fat_g'], entry['carb_g'])}"
+    body = f"_{_truncate(entry['user_text'])}_"
+    if show_date:
+        return f"*{_friendly_date(entry['date_utc'])}*\n{head}\n{body}"
+    return f"• {head}\n  {body}"
 
 
 def format_ai_response(data: dict) -> str:
@@ -817,20 +856,59 @@ def format_ai_response(data: dict) -> str:
     return "\n".join(lines)
 
 
-def format_day_summary(title: str, rows: list) -> str:
+def format_day_summary(date_str: str, rows: list) -> str:
+    """Сводка за один день: заголовок-дата + список записей + итог.
+
+    Записи не дублируют дату (она в заголовке), текст обрезается аккуратно.
+    """
     total_k = sum(r["kcal"] for r in rows)
     total_p = sum(r["protein_g"] for r in rows)
     total_f = sum(r["fat_g"] for r in rows)
     total_c = sum(r["carb_g"] for r in rows)
-    lines = [f"*{title}*\n"]
+
+    lines = [f"📅 *{_friendly_date(date_str)}*", ""]
     for r in rows:
-        lines.append(format_log_entry(r))
+        lines.append(format_log_entry(r, show_date=False))
+        lines.append("")
     if len(rows) >= MAX_DAY_ENTRIES:
-        lines.append(f"\n_Показаны первые {MAX_DAY_ENTRIES} записей_")
+        lines.append(f"_Показаны первые {MAX_DAY_ENTRIES} записей_")
+    lines.append(_DIVIDER)
     lines.append(
-        f"\n*Итого:* {_fmt(total_k)} ккал  "
-        f"Б {_fmt(total_p)}  Ж {_fmt(total_f)}  У {_fmt(total_c)}"
+        f"*📊 Итого: {_fmt(total_k)} ккал*\n"
+        f"{_macros_compact(total_p, total_f, total_c)}"
     )
+    return "\n".join(lines)
+
+
+def format_history(rows: list, max_days: int = 7) -> str:
+    """История, сгруппированная по дням. Для каждого дня — итог и число записей.
+
+    Решает проблему 'бардака': несколько записей за день больше не выглядят
+    как дубликаты, дни показаны компактными карточками сверху вниз.
+    """
+    # Группируем по дате, сохраняя порядок (rows приходят ts DESC)
+    days: dict = {}
+    for r in rows:
+        days.setdefault(r["date_utc"], []).append(r)
+
+    # Самые свежие дни сверху
+    sorted_dates = sorted(days.keys(), reverse=True)[:max_days]
+
+    lines = ["*📋 История*", ""]
+    for date_str in sorted_dates:
+        day_rows = days[date_str]
+        day_k = sum(r["kcal"] for r in day_rows)
+        day_p = sum(r["protein_g"] for r in day_rows)
+        day_f = sum(r["fat_g"] for r in day_rows)
+        day_c = sum(r["carb_g"] for r in day_rows)
+
+        lines.append(f"*🗓 {_friendly_date(date_str)}*")
+        lines.append(f"{_fmt(day_k)} ккал · {_macros_compact(day_p, day_f, day_c)}")
+        if len(day_rows) > 1:
+            lines.append(f"_{len(day_rows)} записи_")
+        lines.append("")
+
+    lines.append("_Нажми «📊 Сегодня» или /day ГГГГ-ММ-ДД для деталей дня_")
     return "\n".join(lines)
 
 
@@ -977,16 +1055,16 @@ def handle_today(chat_id: int, user_id: int) -> None:
     if not rows:
         tg_send_mk(chat_id, "За сегодня записей нет. Расскажи что ел.")
     else:
-        tg_send_mk(chat_id, format_day_summary(f"Сегодня, {date_utc}", rows))
+        tg_send_mk(chat_id, format_day_summary(date_utc, rows))
 
 
 def handle_history(chat_id: int, user_id: int) -> None:
-    rows = get_history(user_id, limit=10)
+    # Тянем больше записей чтобы покрыть несколько дней (по 3-5 записей в день)
+    rows = get_history(user_id, limit=100)
     if not rows:
         tg_send_mk(chat_id, "История пуста.")
     else:
-        lines = ["*Последние записи:*\n"] + [format_log_entry(r) for r in rows]
-        tg_send_mk(chat_id, "\n".join(lines))
+        tg_send_mk(chat_id, format_history(rows))
 
 
 def handle_day(chat_id: int, user_id: int, date_str: str) -> None:
@@ -997,7 +1075,7 @@ def handle_day(chat_id: int, user_id: int, date_str: str) -> None:
         return
     rows = get_history(user_id, date_utc=date_str)
     if not rows:
-        tg_send_mk(chat_id, f"За {date_str} записей нет.")
+        tg_send_mk(chat_id, f"За {_friendly_date(date_str)} записей нет.")
     else:
         tg_send_mk(chat_id, format_day_summary(date_str, rows))
 
