@@ -74,10 +74,12 @@ ALLOWED_USERS = set(
 MAX_REQUESTS_PER_DAY = int(os.getenv("MAX_REQUESTS_PER_DAY", "20"))
 
 # Таймауты:
-# - AI агент в интерфейсе отвечает <15с. 60с — щедрый буфер.
+# - AI агент в интерфейсе отвечает <15с. 25с — буфер, при этом весь вызов
+#   укладывается в окно ожидания Telegram-webhook (~60с), иначе Telegram
+#   рвёт соединение ("Connection timed out") и ответ до пользователя не доходит.
 # - Telegram HTTP вызовы: 10с (на самом деле меньше типично).
 # - YDB connect: 10с.
-AI_TIMEOUT       = 60
+AI_TIMEOUT       = 25
 TG_TIMEOUT       = 10
 YDB_CONNECT      = 10
 
@@ -113,6 +115,11 @@ _validate_env()
 ai_client = openai.OpenAI(
     api_key=AI_API_KEY,
     base_url="https://ai.api.cloud.yandex.net/v1",
+    # max_retries=0: свой ретрай уже есть в call_ai. Дефолтный SDK-ретрай (2)
+    # умножал таймаут (3 попытки × AI_TIMEOUT) и подвешивал функцию на минуты —
+    # Telegram не дожидался ответа и писал "Connection timed out".
+    max_retries=0,
+    timeout=AI_TIMEOUT,
 )
 
 
