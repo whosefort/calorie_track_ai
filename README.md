@@ -104,22 +104,26 @@ CREATE TABLE calories_log (
 ```
 
 ```sql
-CREATE TABLE pending_rewrite (
-    user_id  Int64,
-    date_utc Utf8,
-    ts       Int64,
+CREATE TABLE pending_state (
+    user_id Int64,
+    kind    Utf8,   -- 'rewrite' (payload=дата) | 'meal' (payload=приём пищи)
+    payload Utf8,
+    ts      Int64,
     PRIMARY KEY (user_id)
 );
 ```
 
-```sql
-CREATE TABLE pending_meal (
-    user_id   Int64,
-    meal_type Utf8,
-    ts        Int64,
-    PRIMARY KEY (user_id)
-);
-```
+> **Миграция (если БД уже создана со старыми таблицами):** одна объединённая
+> таблица `pending_state` заменяет прежние `pending_rewrite` и `pending_meal` —
+> это сокращает число запросов к YDB на каждое сообщение. Создай `pending_state`
+> и удали старые таблицы:
+>
+> ```sql
+> DROP TABLE pending_rewrite;
+> DROP TABLE pending_meal;
+> ```
+>
+> Данные переносить не нужно — это эфемерное состояние с TTL в несколько минут.
 
 ---
 
@@ -321,7 +325,7 @@ chmod +x deploy.sh
    AI Studio → API-ключи. Если истёк — пересоздай и обнови `YC_API_KEY` в переменных функции (создаст новую версию — не забудь снова привязать SA).
 
 9. **YDB-таблицы созданы?**
-   YDB → твоя БД → Навигация → должны быть `calories_log` и `pending_rewrite`.
+   YDB → твоя БД → Навигация → должны быть `calories_log` и `pending_state`.
 
 ---
 

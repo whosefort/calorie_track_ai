@@ -140,91 +140,95 @@ def _get_pool() -> ydb.SessionPool:
     return _ydb_pool
 
 
+def _ydb_exec(query: str, params: dict = None) -> list:
+    """Готовит и выполняет YQL-запрос в одной транзакции с авто-ретраем.
+
+    Снимает boilerplate (pool → session → prepare → transaction → commit →
+    retry), который раньше дублировался в каждой функции работы с БД.
+    Возвращает список result-set'ов; $-параметры передаются через params.
+    """
+    pool = _get_pool()
+
+    def _op(session):
+        prepared = session.prepare(query)
+        return session.transaction().execute(prepared, params or {}, commit_tx=True)
+
+    return pool.retry_operation_sync(_op)
+
+
 def save_record(user_id: int, user_text: str, ai_json: str, totals: dict,
                 date_utc: str = None) -> None:
-    pool = _get_pool()
-    now  = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     record_id = str(uuid.uuid4())
     if date_utc is None:
         date_utc = now.strftime("%Y-%m-%d")
 
-    def _upsert(session):
-        prepared = session.prepare("""
-            DECLARE $user_id   AS Int64;
-            DECLARE $record_id AS Utf8;
-            DECLARE $ts        AS Int64;
-            DECLARE $date_utc  AS Utf8;
-            DECLARE $user_text AS Utf8;
-            DECLARE $ai_json   AS Utf8;
-            DECLARE $kcal      AS Double;
-            DECLARE $protein_g AS Double;
-            DECLARE $fat_g     AS Double;
-            DECLARE $carb_g    AS Double;
+    _ydb_exec("""
+        DECLARE $user_id   AS Int64;
+        DECLARE $record_id AS Utf8;
+        DECLARE $ts        AS Int64;
+        DECLARE $date_utc  AS Utf8;
+        DECLARE $user_text AS Utf8;
+        DECLARE $ai_json   AS Utf8;
+        DECLARE $kcal      AS Double;
+        DECLARE $protein_g AS Double;
+        DECLARE $fat_g     AS Double;
+        DECLARE $carb_g    AS Double;
 
-            UPSERT INTO calories_log
-                (user_id, record_id, ts, date_utc, user_text, ai_json,
-                 kcal, protein_g, fat_g, carb_g)
-            VALUES
-                ($user_id, $record_id, $ts, $date_utc, $user_text, $ai_json,
-                 $kcal, $protein_g, $fat_g, $carb_g);
-        """)
-        session.transaction().execute(prepared, {
-            "$user_id":   user_id,
-            "$record_id": record_id,
-            "$ts":        int(now.timestamp()),
-            "$date_utc":  date_utc,
-            "$user_text": user_text[:500],
-            "$ai_json":   ai_json,
-            "$kcal":      float(totals.get("kcal", 0)),
-            "$protein_g": float(totals.get("protein_g", 0)),
-            "$fat_g":     float(totals.get("fat_g", 0)),
-            "$carb_g":    float(totals.get("carb_g", 0)),
-        }, commit_tx=True)
-
-    pool.retry_operation_sync(_upsert)
+        UPSERT INTO calories_log
+            (user_id, record_id, ts, date_utc, user_text, ai_json,
+             kcal, protein_g, fat_g, carb_g)
+        VALUES
+            ($user_id, $record_id, $ts, $date_utc, $user_text, $ai_json,
+             $kcal, $protein_g, $fat_g, $carb_g);
+    """, {
+        "$user_id":   user_id,
+        "$record_id": record_id,
+        "$ts":        int(now.timestamp()),
+        "$date_utc":  date_utc,
+        "$user_text": user_text[:500],
+        "$ai_json":   ai_json,
+        "$kcal":      float(totals.get("kcal", 0)),
+        "$protein_g": float(totals.get("protein_g", 0)),
+        "$fat_g":     float(totals.get("fat_g", 0)),
+        "$carb_g":    float(totals.get("carb_g", 0)),
+    })
     logger.info(f"saved record {record_id} user={user_id} date={date_utc}")
 
 
 def get_history(user_id: int, date_utc: str = None, limit: int = 10) -> list:
-    pool = _get_pool()
+    if date_utc:
+        rs = _ydb_exec("""
+            DECLARE $user_id  AS Int64;
+            DECLARE $date_utc AS Utf8;
+            DECLARE $limit    AS Uint64;
 
-    def _select(session):
-        if date_utc:
-            prepared = session.prepare("""
-                DECLARE $user_id  AS Int64;
-                DECLARE $date_utc AS Utf8;
-                DECLARE $limit    AS Uint64;
+            SELECT record_id, ts, date_utc, user_text,
+                   kcal, protein_g, fat_g, carb_g
+            FROM calories_log
+            WHERE user_id = $user_id AND date_utc = $date_utc
+            ORDER BY ts
+            LIMIT $limit;
+        """, {
+            "$user_id":  user_id,
+            "$date_utc": date_utc,
+            "$limit":    MAX_DAY_ENTRIES,
+        })
+    else:
+        rs = _ydb_exec("""
+            DECLARE $user_id AS Int64;
+            DECLARE $limit   AS Uint64;
 
-                SELECT record_id, ts, date_utc, user_text,
-                       kcal, protein_g, fat_g, carb_g
-                FROM calories_log
-                WHERE user_id = $user_id AND date_utc = $date_utc
-                ORDER BY ts
-                LIMIT $limit;
-            """)
-            return session.transaction().execute(prepared, {
-                "$user_id":  user_id,
-                "$date_utc": date_utc,
-                "$limit":    MAX_DAY_ENTRIES,
-            }, commit_tx=True)
-        else:
-            prepared = session.prepare("""
-                DECLARE $user_id AS Int64;
-                DECLARE $limit   AS Uint64;
-
-                SELECT record_id, ts, date_utc, user_text,
-                       kcal, protein_g, fat_g, carb_g
-                FROM calories_log
-                WHERE user_id = $user_id
-                ORDER BY ts DESC
-                LIMIT $limit;
-            """)
-            return session.transaction().execute(prepared, {
-                "$user_id": user_id,
-                "$limit":   limit,
-            }, commit_tx=True)
-
-    rs = pool.retry_operation_sync(_select)
+            SELECT record_id, ts, date_utc, user_text,
+                   kcal, protein_g, fat_g, carb_g
+            FROM calories_log
+            WHERE user_id = $user_id
+            ORDER BY ts DESC
+            LIMIT $limit;
+        """, {
+            "$user_id": user_id,
+            "$limit":   limit,
+        })
     return [{
         "record_id": row.record_id,
         "ts":        row.ts,
@@ -237,155 +241,94 @@ def get_history(user_id: int, date_utc: str = None, limit: int = 10) -> list:
     } for row in rs[0].rows]
 
 
+def count_day(user_id: int, date_utc: str) -> int:
+    """Число записей за день одним COUNT(*) — без вытягивания строк целиком."""
+    rs = _ydb_exec("""
+        DECLARE $user_id  AS Int64;
+        DECLARE $date_utc AS Utf8;
+        SELECT COUNT(*) AS cnt FROM calories_log
+        WHERE user_id = $user_id AND date_utc = $date_utc;
+    """, {"$user_id": user_id, "$date_utc": date_utc})
+    return rs[0].rows[0].cnt if rs[0].rows else 0
+
+
 def delete_day(user_id: int, date_utc: str) -> int:
-    pool = _get_pool()
-    rows = get_history(user_id, date_utc=date_utc)
-    if not rows:
+    """Удаляет все записи за день одним DELETE. Возвращает сколько удалил."""
+    deleted = count_day(user_id, date_utc)
+    if deleted == 0:
         return 0
-    record_ids = [r["record_id"] for r in rows]
-
-    def _delete(session):
-        tx = session.transaction()
-        prepared = session.prepare("""
-            DECLARE $user_id   AS Int64;
-            DECLARE $record_id AS Utf8;
-            DELETE FROM calories_log
-            WHERE user_id = $user_id AND record_id = $record_id;
-        """)
-        for rid in record_ids:
-            tx.execute(prepared, {"$user_id": user_id, "$record_id": rid})
-        tx.commit()
-
-    pool.retry_operation_sync(_delete)
-    logger.info(f"deleted {len(record_ids)} records user={user_id} date={date_utc}")
-    return len(record_ids)
-
-
-def count_today_requests(user_id: int, date_utc: str) -> int:
-    return len(get_history(user_id, date_utc=date_utc, limit=MAX_REQUESTS_PER_DAY + 1))
-
-
-def save_pending_rewrite(user_id: int, date_str: str) -> None:
-    pool = _get_pool()
-    def _upsert(session):
-        prepared = session.prepare("""
-            DECLARE $user_id  AS Int64;
-            DECLARE $date_utc AS Utf8;
-            DECLARE $ts       AS Int64;
-            UPSERT INTO pending_rewrite (user_id, date_utc, ts)
-            VALUES ($user_id, $date_utc, $ts);
-        """)
-        session.transaction().execute(prepared, {
-            "$user_id":  user_id,
-            "$date_utc": date_str,
-            "$ts":       int(datetime.now(timezone.utc).timestamp()),
-        }, commit_tx=True)
-    try:
-        pool.retry_operation_sync(_upsert)
-    except Exception as e:
-        logger.error(f"save_pending_rewrite: {e}")
-
-
-def get_pending_rewrite(user_id: int):
-    pool = _get_pool()
-    def _select(session):
-        prepared = session.prepare("""
-            DECLARE $user_id AS Int64;
-            DECLARE $min_ts  AS Int64;
-            SELECT date_utc FROM pending_rewrite
-            WHERE user_id = $user_id AND ts > $min_ts;
-        """)
-        return session.transaction().execute(prepared, {
-            "$user_id": user_id,
-            "$min_ts":  int(datetime.now(timezone.utc).timestamp()) - 300,
-        }, commit_tx=True)
-    try:
-        rs = pool.retry_operation_sync(_select)
-        rows = rs[0].rows
-        return rows[0].date_utc if rows else None
-    except Exception as e:
-        logger.error(f"get_pending_rewrite: {e}")
-        return None
-
-
-def clear_pending_rewrite(user_id: int) -> None:
-    pool = _get_pool()
-    def _delete(session):
-        prepared = session.prepare("""
-            DECLARE $user_id AS Int64;
-            DELETE FROM pending_rewrite WHERE user_id = $user_id;
-        """)
-        session.transaction().execute(prepared, {"$user_id": user_id}, commit_tx=True)
-    try:
-        pool.retry_operation_sync(_delete)
-    except Exception as e:
-        logger.error(f"clear_pending_rewrite: {e}")
+    _ydb_exec("""
+        DECLARE $user_id  AS Int64;
+        DECLARE $date_utc AS Utf8;
+        DELETE FROM calories_log
+        WHERE user_id = $user_id AND date_utc = $date_utc;
+    """, {"$user_id": user_id, "$date_utc": date_utc})
+    logger.info(f"deleted {deleted} records user={user_id} date={date_utc}")
+    return deleted
 
 
 # ---------------------------------------------------------------------------
-# pending_meal — временное состояние выбранного приёма пищи через /add
-# TTL: 10 минут (600 сек)
+# pending_state — единое временное состояние ожидаемого ввода пользователя.
+# Заменяет прежние таблицы pending_rewrite и pending_meal: одна строка на
+# пользователя (PK user_id) → одна проверка вместо двух SELECT'ов на сообщение.
+#   kind='rewrite' → payload = date_utc (перезапись дня),    TTL 300с
+#   kind='meal'    → payload = meal_type (приём пищи /add),   TTL 600с
+# UPSERT перезаписывает строку целиком, поэтому отдельный clear перед
+# сменой ожидания не нужен.
 # ---------------------------------------------------------------------------
 
-_PENDING_MEAL_TTL = 600  # секунд
+_PENDING_TTL = {"rewrite": 300, "meal": 600}
 
 
-def save_pending_meal(user_id: int, meal_type: str) -> None:
-    pool = _get_pool()
-    def _upsert(session):
-        prepared = session.prepare("""
-            DECLARE $user_id   AS Int64;
-            DECLARE $meal_type AS Utf8;
-            DECLARE $ts        AS Int64;
-            UPSERT INTO pending_meal (user_id, meal_type, ts)
-            VALUES ($user_id, $meal_type, $ts);
-        """)
-        session.transaction().execute(prepared, {
-            "$user_id":   user_id,
-            "$meal_type": meal_type,
-            "$ts":        int(datetime.now(timezone.utc).timestamp()),
-        }, commit_tx=True)
+def save_pending(user_id: int, kind: str, payload: str) -> None:
     try:
-        pool.retry_operation_sync(_upsert)
-    except Exception as e:
-        logger.error(f"save_pending_meal: {e}")
-
-
-def get_pending_meal(user_id: int):
-    """Возвращает meal_type если есть активный pending (< 10 мин), иначе None."""
-    pool = _get_pool()
-    def _select(session):
-        prepared = session.prepare("""
+        _ydb_exec("""
             DECLARE $user_id AS Int64;
-            DECLARE $min_ts  AS Int64;
-            SELECT meal_type FROM pending_meal
-            WHERE user_id = $user_id AND ts > $min_ts;
-        """)
-        return session.transaction().execute(prepared, {
+            DECLARE $kind    AS Utf8;
+            DECLARE $payload AS Utf8;
+            DECLARE $ts      AS Int64;
+            UPSERT INTO pending_state (user_id, kind, payload, ts)
+            VALUES ($user_id, $kind, $payload, $ts);
+        """, {
             "$user_id": user_id,
-            "$min_ts":  int(datetime.now(timezone.utc).timestamp()) - _PENDING_MEAL_TTL,
-        }, commit_tx=True)
-    try:
-        rs = pool.retry_operation_sync(_select)
-        rows = rs[0].rows
-        return rows[0].meal_type if rows else None
+            "$kind":    kind,
+            "$payload": payload,
+            "$ts":      int(datetime.now(timezone.utc).timestamp()),
+        })
     except Exception as e:
-        logger.error(f"get_pending_meal: {e}")
+        logger.error(f"save_pending: {e}")
+
+
+def get_pending(user_id: int):
+    """Возвращает (kind, payload) активного ожидания или None.
+    TTL зависит от kind (см. _PENDING_TTL)."""
+    try:
+        rs = _ydb_exec("""
+            DECLARE $user_id AS Int64;
+            SELECT kind, payload, ts FROM pending_state
+            WHERE user_id = $user_id;
+        """, {"$user_id": user_id})
+        rows = rs[0].rows
+        if not rows:
+            return None
+        row = rows[0]
+        ttl = _PENDING_TTL.get(row.kind, 300)
+        if int(datetime.now(timezone.utc).timestamp()) - row.ts > ttl:
+            return None
+        return (row.kind, row.payload)
+    except Exception as e:
+        logger.error(f"get_pending: {e}")
         return None
 
 
-def clear_pending_meal(user_id: int) -> None:
-    pool = _get_pool()
-    def _delete(session):
-        prepared = session.prepare("""
-            DECLARE $user_id AS Int64;
-            DELETE FROM pending_meal WHERE user_id = $user_id;
-        """)
-        session.transaction().execute(prepared, {"$user_id": user_id}, commit_tx=True)
+def clear_pending(user_id: int) -> None:
     try:
-        pool.retry_operation_sync(_delete)
+        _ydb_exec("""
+            DECLARE $user_id AS Int64;
+            DELETE FROM pending_state WHERE user_id = $user_id;
+        """, {"$user_id": user_id})
     except Exception as e:
-        logger.error(f"clear_pending_meal: {e}")
+        logger.error(f"clear_pending: {e}")
 
 
 # ============================================================================
@@ -524,6 +467,22 @@ def call_ai(user_message: str) -> dict:
         return _call_ai_once(_RETRY_PREFIX + user_message)
 
 
+def _safe_call_ai(chat_id: int, text: str, context: str = ""):
+    """call_ai с единой обработкой ошибок. Возвращает dict, либо None —
+    в этом случае пользователю уже отправлено сообщение об ошибке."""
+    try:
+        return call_ai(text)
+    except json.JSONDecodeError:
+        tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
+    except ValueError:
+        tg_send_mk(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
+    except Exception as e:
+        where = f" in {context}" if context else ""
+        logger.error(f"AI error{where}: {e}", exc_info=True)
+        tg_send_mk(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+    return None
+
+
 # ============================================================================
 # TELEGRAM
 # ============================================================================
@@ -650,7 +609,7 @@ def handle_rewrite_callback(chat_id: int, user_id: int,
         f"Напиши что ел в этот день — я пересчитаю и заменю рацион.\n"
         f"Или /cancel чтобы отменить."
     )
-    save_pending_rewrite(user_id, date_str)
+    save_pending(user_id, "rewrite", date_str)
 
 
 def show_add_keyboard(chat_id: int) -> None:
@@ -675,9 +634,8 @@ def handle_add_meal_callback(chat_id: int, user_id: int,
     if meal_type not in MEAL_AI_PREFIX:
         logger.warning(f"unknown meal_type in callback: {meal_type!r}")
         return
-    # Сбрасываем rewrite-ожидание если было
-    clear_pending_rewrite(user_id)
-    save_pending_meal(user_id, meal_type)
+    # UPSERT перезапишет любое прежнее ожидание — отдельный clear не нужен
+    save_pending(user_id, "meal", meal_type)
     prompt = MEAL_PROMPT_TEXT.get(meal_type, "Пиши что ел:")
     tg_send(chat_id, f"{prompt}\n\n_Или /cancel чтобы отменить_")
 
@@ -928,9 +886,9 @@ def process_food_message(chat_id: int, user_id: int, text: str,
 
     # Лимит запросов
     try:
-        count = count_today_requests(user_id, date_utc)
+        count = count_day(user_id, date_utc)
     except Exception as e:
-        logger.error(f"count_today_requests: {e}", exc_info=True)
+        logger.error(f"count_day: {e}", exc_info=True)
         tg_send(chat_id, "Ошибка БД. Попробуй позже.")
         return
 
@@ -949,17 +907,8 @@ def process_food_message(chat_id: int, user_id: int, text: str,
         ai_input = MEAL_AI_PREFIX[meal_type] + text
         logger.info(f"meal_type hint: {meal_type!r}")
 
-    try:
-        data = call_ai(ai_input)
-    except json.JSONDecodeError:
-        tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
-        return
-    except ValueError:
-        tg_send_mk(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
-        return
-    except Exception as e:
-        logger.error(f"AI error: {e}", exc_info=True)
-        tg_send_mk(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+    data = _safe_call_ai(chat_id, ai_input)
+    if data is None:
         return
 
     tg_send_mk(chat_id, format_ai_response(data))
@@ -991,17 +940,8 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
 
     tg_send(chat_id, f"Считаю калории для {date_utc}...")
 
-    try:
-        data = call_ai(text)
-    except json.JSONDecodeError:
-        tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
-        return
-    except ValueError:
-        tg_send_mk(chat_id, "Агент вернул неожиданный формат. Попробуй позже.")
-        return
-    except Exception as e:
-        logger.error(f"AI error in rewrite: {e}", exc_info=True)
-        tg_send_mk(chat_id, "Ошибка при обращении к агенту. Попробуй позже.")
+    data = _safe_call_ai(chat_id, text, context="rewrite")
+    if data is None:
         return
 
     try:
@@ -1119,17 +1059,17 @@ def route_message(message: dict) -> None:
     # Проверяем ДО pending-состояний: если пользователь нажал кнопку меню
     # пока ждали ввода — выполняем действие кнопки, pending сбрасывается.
     if text in _BUTTON_TEXTS:
-        # Кнопки всегда сбрасывают оба pending-состояния
-        clear_pending_rewrite(user_id)
-        clear_pending_meal(user_id)
-
+        # Нажатие кнопки отменяет любое прежнее ожидание ввода.
+        # BTN_DAY_LOG сразу ставит новое ожидание (UPSERT перезапишет строку),
+        # поэтому для него отдельный clear не нужен — у остальных делаем clear.
         if text == BTN_ADD:
+            clear_pending(user_id)
             show_add_keyboard(chat_id)
             return
 
         if text == BTN_DAY_LOG:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            save_pending_rewrite(user_id, today)
+            save_pending(user_id, "rewrite", today)
             tg_send_mk(chat_id,
                 "Напиши всё что ел сегодня одним сообщением — "
                 "я запишу как дневной рацион и заменю старые данные.\n\n"
@@ -1138,31 +1078,31 @@ def route_message(message: dict) -> None:
             return
 
         if text == BTN_TODAY:
+            clear_pending(user_id)
             handle_today(chat_id, user_id)
             return
 
         if text == BTN_HISTORY:
+            clear_pending(user_id)
             handle_history(chat_id, user_id)
             return
 
         if text == BTN_REWRITE:
+            clear_pending(user_id)
             show_rewrite_keyboard(chat_id)
             return
 
-    # ── Pending-состояния ─────────────────────────────────────────────────
+    # ── Pending-состояние ─────────────────────────────────────────────────
+    # Один SELECT вместо двух: get_pending возвращает (kind, payload).
     if not text.startswith("/"):
-        # Rewrite имеет приоритет (явное действие пользователя)
-        pending_date = get_pending_rewrite(user_id)
-        if pending_date:
-            clear_pending_rewrite(user_id)
-            process_rewrite(chat_id, user_id, text, pending_date)
-            return
-
-        # Если был выбран приём пищи через /add
-        pending_meal = get_pending_meal(user_id)
-        if pending_meal:
-            clear_pending_meal(user_id)
-            process_food_message(chat_id, user_id, text, meal_type=pending_meal)
+        pending = get_pending(user_id)
+        if pending:
+            kind, payload = pending
+            clear_pending(user_id)
+            if kind == "rewrite":
+                process_rewrite(chat_id, user_id, text, payload)
+            else:  # meal
+                process_food_message(chat_id, user_id, text, meal_type=payload)
             return
 
     # ── Команды ───────────────────────────────────────────────────────────
@@ -1171,13 +1111,12 @@ def route_message(message: dict) -> None:
         return
 
     if text == "/cancel":
-        clear_pending_rewrite(user_id)
-        clear_pending_meal(user_id)
+        clear_pending(user_id)
         tg_send_mk(chat_id, "Отменено.")
         return
 
     if text.startswith("/add"):
-        clear_pending_rewrite(user_id)
+        clear_pending(user_id)
         show_add_keyboard(chat_id)
         return
 
