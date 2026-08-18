@@ -1,0 +1,22 @@
+[Unit]
+Description=Calories Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=calories-bot
+Group=calories-bot
+WorkingDirectory=/opt/calories-bot/app
+EnvironmentFile=/etc/calories-bot/calories-bot.env
+ExecStart=/opt/calories-bot/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8080 --workers 1
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/calories-bot
+
+[Install]
+WantedBy=multi-user.target

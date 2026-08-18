@@ -1,0 +1,10 @@
+__BOT_DOMAIN__ {
+	encode zstd gzip
+
+	@bot_paths path /telegram/webhook /healthz
+	handle @bot_paths {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	respond 404
+}
