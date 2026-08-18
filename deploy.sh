@@ -65,7 +65,10 @@ setup_config() {
     warn "Конфиг уже существует: $CONFIG_FILE"
     read -r -p "Конфиг: 1) оставить текущий, 2) перезаписать [1]: " answer
     case "$answer" in
-      ""|1|n|N|no|No) return ;;
+      ""|1|n|N|no|No)
+        log "Текущий конфиг оставлен"
+        return 0
+        ;;
       2|y|Y|yes|Yes) ;;
       *) fail "Введи 1 (оставить) или 2 (перезаписать)" ;;
     esac
@@ -279,6 +282,7 @@ case "$COMMAND" in
     id "$APP_USER" &>/dev/null || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
     ensure_base_dependencies
     setup_config
+    log "Конфиг готов; запускаю deploy"
     deploy
     ;;
   deploy)
