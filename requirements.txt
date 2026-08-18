@@ -1,4 +1,4 @@
 openai>=1.66.0
 requests>=2.32.0
-ydb>=3.18.0
-ydb[yc]
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
