@@ -69,9 +69,12 @@ setup_config() {
 
   local token mode secret users base_url api_key model schema domain
   read -r -s -p "Telegram bot token: " token; printf '\n'
-  read -r -p "Режим Telegram [polling без домена / webhook с доменом, polling]: " mode
-  mode="${mode:-polling}"
-  [[ "$mode" == "webhook" || "$mode" == "polling" ]] || fail "Допустимо webhook или polling"
+  read -r -p "Режим Telegram: 1) без домена (рекомендуется), 2) webhook с доменом [1]: " mode
+  case "$mode" in
+    ""|1|polling|pooling|"polling без домена"|"pooling без домена") mode="polling" ;;
+    2|webhook|"webhook с доменом") mode="webhook" ;;
+    *) fail "Введи 1 (без домена) или 2 (webhook с доменом)" ;;
+  esac
   if [[ "$mode" == "webhook" ]]; then
     read -r -s -p "Webhook secret (Enter = сгенерировать): " secret; printf '\n'
     [[ -n "$secret" ]] || secret="$(openssl rand -hex 24)"
