@@ -27,10 +27,15 @@ require_root() { [[ "${EUID}" -eq 0 ]] || fail "Запусти: sudo ./deploy.sh
 valid_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ && "$1" == *.* ]]; }
 write_env_line() { printf '%s=%q\n' "$1" "$2"; }
 
-ensure_dependencies() {
+ensure_base_dependencies() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y python3 python3-venv python3-pip rsync curl ca-certificates caddy openssl sqlite3
+  apt-get install -y python3 python3-venv python3-pip rsync curl ca-certificates openssl sqlite3
+}
+
+ensure_webhook_dependencies() {
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y caddy
 }
 
 check_runtime() {
@@ -44,8 +49,7 @@ check_runtime() {
 }
 
 ensure_firewall() {
-  # Не трогаем firewall, если UFW не установлен или выключен. Если он активен,
-  # открываем только два порта, нужные Caddy для ACME и Telegram.
+  # Только webhook требует входящие порты для Caddy/ACME и Telegram.
   if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
     ufw allow 80/tcp
     ufw allow 443/tcp
@@ -63,31 +67,39 @@ setup_config() {
     [[ "$answer" =~ ^[Yy]$ ]] || return
   fi
 
-  local token secret users base_url api_key model schema domain
+  local token mode secret users base_url api_key model schema domain
   read -r -s -p "Telegram bot token: " token; printf '\n'
-  read -r -s -p "Webhook secret (Enter = сгенерировать): " secret; printf '\n'
-  [[ -n "$secret" ]] || secret="$(openssl rand -hex 24)"
+  read -r -p "Режим Telegram [polling без домена / webhook с доменом, polling]: " mode
+  mode="${mode:-polling}"
+  [[ "$mode" == "webhook" || "$mode" == "polling" ]] || fail "Допустимо webhook или polling"
+  if [[ "$mode" == "webhook" ]]; then
+    read -r -s -p "Webhook secret (Enter = сгенерировать): " secret; printf '\n'
+    [[ -n "$secret" ]] || secret="$(openssl rand -hex 24)"
+  fi
   read -r -p "Разрешённые Telegram user_id (через запятую, Enter = все): " users
-  read -r -p "URL OpenAI-compatible API [https://api.openai.com/v1]: " base_url
-  base_url="${base_url:-https://api.openai.com/v1}"
-  read -r -s -p "API key (только ключ, без Bearer): " api_key; printf '\n'
-  read -r -p "ID модели (например gpt-4o-mini): " model
+  read -r -p "URL API [Gemini: https://generativelanguage.googleapis.com/v1beta/openai/]: " base_url
+  base_url="${base_url:-https://generativelanguage.googleapis.com/v1beta/openai/}"
+  read -r -s -p "API key (Gemini по умолчанию; только ключ, без Bearer): " api_key; printf '\n'
+  read -r -p "ID модели [gemini-3.5-flash-lite]: " model
+  model="${model:-gemini-3.5-flash-lite}"
   read -r -p "JSON Schema mode [auto recommended/strict, auto]: " schema
   schema="${schema:-auto}"
-  read -r -p "Домен с A-записью на этот VPS: " domain
+  if [[ "$mode" == "webhook" ]]; then
+    read -r -p "Домен с A/AAAA-записью на этот VPS: " domain
+  fi
 
   [[ -n "$token" ]] || fail "Telegram token не может быть пустым"
   [[ -n "$api_key" ]] || fail "API key не может быть пустым"
-  [[ -n "$model" ]] || fail "ID модели не может быть пустым"
   [[ "$users" =~ ^([0-9]+(,[0-9]+)*)?$ ]] || fail "user_id должны быть числами через запятую"
   [[ "$schema" == "auto" || "$schema" == "strict" ]] || fail "Допустимо auto или strict"
-  valid_domain "$domain" || fail "Некорректный домен: $domain"
+  [[ "$mode" != "webhook" ]] || valid_domain "$domain" || fail "Некорректный домен: $domain"
 
   (
     umask 077
     {
       write_env_line TELEGRAM_TOKEN "$token"
-      write_env_line WEBHOOK_SECRET "$secret"
+      write_env_line TELEGRAM_MODE "$mode"
+      [[ "$mode" != "webhook" ]] || write_env_line WEBHOOK_SECRET "$secret"
       write_env_line ALLOWED_USERS "$users"
       write_env_line MAX_REQUESTS_PER_DAY "20"
       write_env_line LLM_BASE_URL "$base_url"
@@ -96,7 +108,7 @@ setup_config() {
       write_env_line LLM_STRUCTURED_OUTPUT "$schema"
       write_env_line AI_TIMEOUT "20"
       write_env_line DATABASE_PATH "$DATA_DIR/calories.sqlite3"
-      write_env_line BOT_DOMAIN "$domain"
+      [[ "$mode" != "webhook" ]] || write_env_line BOT_DOMAIN "$domain"
     } > "$CONFIG_FILE"
   )
   chmod 600 "$CONFIG_FILE"
@@ -138,6 +150,44 @@ configure_caddy() {
   caddy validate --config "$CADDY_FILE" --adapter caddyfile
   systemctl enable --now caddy
   systemctl reload caddy
+}
+
+verify_telegram_token() {
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  local result ok
+  result="$(curl --fail-with-body --silent --show-error \
+    "https://api.telegram.org/bot${TELEGRAM_TOKEN}/getMe")" || fail "Telegram token не принят"
+  ok="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))' <<<"$result")"
+  [[ "$ok" == "True" ]] || fail "Telegram token не принят: $result"
+  log "Telegram token проверен"
+}
+
+verify_default_gemini_config() {
+  # Проверяем бесплатным запросом именно пару ключ+модель, которую setup
+  # предлагает по умолчанию. Для другого OpenAI-compatible API не гадаем.
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  [[ "${LLM_BASE_URL:-}" == "https://generativelanguage.googleapis.com/v1beta/openai/" ]] || return
+  local result
+  result="$(curl --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer ${LLM_API_KEY}" \
+    "${LLM_BASE_URL}models/${LLM_MODEL}")" || \
+      fail "Gemini не принял ключ или модель '${LLM_MODEL}'"
+  log "Gemini key и модель проверены: ${LLM_MODEL}"
+}
+
+disable_webhook() {
+  # Telegram не разрешает getUpdates, пока активен webhook. Очередь не сбрасываем.
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  local result ok
+  result="$(curl --fail-with-body --silent --show-error \
+    --data-urlencode "drop_pending_updates=false" \
+    "https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteWebhook")" || fail "Telegram deleteWebhook не выполнился"
+  ok="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("ok", False))' <<<"$result")"
+  [[ "$ok" == "True" ]] || fail "Telegram не отключил webhook: $result"
+  log "Webhook отключён; бот получает сообщения через polling"
 }
 
 backup_database() {
@@ -183,16 +233,29 @@ register_webhook() {
 
 deploy() {
   [[ -f "$CONFIG_FILE" ]] || fail "Нет конфига. Сначала: sudo ./deploy.sh setup"
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  local mode="${TELEGRAM_MODE:-webhook}"
+  [[ "$mode" == "webhook" || "$mode" == "polling" ]] || fail "TELEGRAM_MODE: webhook или polling"
   check_runtime
-  ensure_firewall
   backup_database
   sync_code
   configure_systemd
-  configure_caddy
+  verify_telegram_token
+  verify_default_gemini_config
+  if [[ "$mode" == "webhook" ]]; then
+    ensure_webhook_dependencies
+    ensure_firewall
+    configure_caddy
+  else
+    disable_webhook
+  fi
   systemctl restart "$APP_NAME"
   systemctl --no-pager --full status "$APP_NAME"
-  wait_for_https
-  register_webhook
+  if [[ "$mode" == "webhook" ]]; then
+    wait_for_https
+    register_webhook
+  fi
   log "Готово. Логи: journalctl -u ${APP_NAME} -f"
 }
 
@@ -201,7 +264,7 @@ case "$COMMAND" in
   setup)
     require_root
     id "$APP_USER" &>/dev/null || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$APP_USER"
-    ensure_dependencies
+    ensure_base_dependencies
     setup_config
     deploy
     ;;

@@ -45,6 +45,7 @@ logger = _setup_logging()
 
 TELEGRAM_TOKEN  = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_API    = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TELEGRAM_MODE   = os.getenv("TELEGRAM_MODE", "webhook").lower()
 WEBHOOK_SECRET  = os.getenv("WEBHOOK_SECRET", "")
 
 LLM_API_KEY      = os.getenv("LLM_API_KEY", "")
@@ -98,12 +99,16 @@ MAX_AI_TIP_LENGTH   = 300
 # старте, чем неясная ошибка в середине webhook.
 def _validate_env():
     missing = []
-    for name, value in [
+    required = [
         ("TELEGRAM_TOKEN", TELEGRAM_TOKEN),
-        ("WEBHOOK_SECRET", WEBHOOK_SECRET),
         ("LLM_API_KEY",    LLM_API_KEY),
         ("LLM_MODEL",      LLM_MODEL),
-    ]:
+    ]
+    if TELEGRAM_MODE == "webhook":
+        required.append(("WEBHOOK_SECRET", WEBHOOK_SECRET))
+    elif TELEGRAM_MODE != "polling":
+        missing.append("TELEGRAM_MODE must be webhook or polling")
+    for name, value in required:
         if not value:
             missing.append(name)
     if missing:
@@ -1397,13 +1402,10 @@ def route_message(message: dict) -> None:
     process_food_message(chat_id, user_id, text)
 
 
-def process_telegram_update(body: dict, headers: dict = None) -> None:
-    """Обрабатывает update Telegram. Общая функция для FastAPI и тестов."""
-    headers = headers or {}
-    verify_webhook_headers(headers)
-
+def _process_telegram_update(body: dict) -> None:
+    """Общая обработка уже аутентифицированного Telegram update."""
     if not isinstance(body, dict):
-        logger.warning("ignored non-object webhook payload")
+        logger.warning("ignored non-object Telegram payload")
         return
 
     update_id = body.get("update_id")
@@ -1433,6 +1435,17 @@ def process_telegram_update(body: dict, headers: dict = None) -> None:
     message = body.get("message")
     if message:
         route_message(message)
+
+
+def process_telegram_update(body: dict, headers: dict = None) -> None:
+    """Обрабатывает update, пришедший через публичный webhook."""
+    verify_webhook_headers(headers or {})
+    _process_telegram_update(body)
+
+
+def process_polled_update(body: dict) -> None:
+    """Обрабатывает update, полученный напрямую из Telegram getUpdates."""
+    _process_telegram_update(body)
 
 
 def handler(event, context=None):

@@ -1,15 +1,15 @@
 # Calories Bot на VPS
 
-Telegram-бот считает калории и БЖУ, хранит историю в SQLite на VPS и вызывает модель через OpenAI-совместимый API. В проекте больше нет зависимости от Yandex Cloud Functions, API Gateway или YDB.
+Telegram-бот считает калории и БЖУ, хранит историю в SQLite на VPS и вызывает модель через OpenAI-совместимый API. По умолчанию работает без домена: сам забирает сообщения у Telegram через long polling.
 
 ```
-Telegram → Caddy (HTTPS) → FastAPI/Uvicorn → модель по API
-                                      └────→ SQLite на VPS
+Telegram ← long polling ← бот на VPS → Gemini API
+                         └──────────→ SQLite на VPS
 ```
 
 ## Быстрый запуск
 
-Нужен VPS с Debian/Ubuntu и Python 3.9+, публичный IPv4 и домен. До запуска создай у домена A-запись на IP VPS и дождись её распространения. Если есть AAAA-запись, она тоже должна вести на этот VPS. Во внешнем firewall провайдера должны быть открыты TCP `80` и `443`; при активном UFW скрипт откроет их сам. Caddy сам выпустит TLS-сертификат.
+Нужен VPS с Debian/Ubuntu и доступом в интернет. Домен, публичный IP и входящие порты не нужны для режима по умолчанию.
 
 ```bash
 git clone <URL_РЕПОЗИТОРИЯ> calories-bot
@@ -18,9 +18,9 @@ chmod +x deploy.sh
 sudo ./deploy.sh setup
 ```
 
-`setup` прямо в консоли спросит токен Telegram, домен, API endpoint, ключ и модель. Он установит зависимости, Caddy и systemd, сохранит конфиг в `/etc/calories-bot/calories-bot.env`, включит HTTPS и зарегистрирует webhook.
+`setup` по умолчанию выберет polling, Gemini API и `gemini-3.5-flash-lite`. Нужно вставить токен Telegram, ключ Gemini и при желании свой Telegram `user_id`. Конфиг сохранится в `/etc/calories-bot/calories-bot.env` с правами `600`.
 
-Поля вводятся как обычные значения: ключ вставляй **без** `Bearer`, `export` и кавычек. Например, в поле API key вставляется `sk-or-v1-...`, а не `Authorization: Bearer sk-or-v1-...`. `WEBHOOK_SECRET` можно оставить пустым: setup сам создаст криптографически случайный секрет.
+Ключ вставляй **без** `Bearer`, `export` и кавычек. Например, `AIza...`, а не `Authorization: Bearer AIza...`. Скрипт проверит Telegram-токен и для Gemini — пару «ключ + модель»; polling сам отключит старый webhook, но не удалит ожидающие сообщения.
 
 После этого обновление одной командой:
 
@@ -28,7 +28,12 @@ sudo ./deploy.sh setup
 git pull && sudo ./deploy.sh deploy
 ```
 
-Скрипт копирует новый код в `/opt/calories-bot/app`, обновляет зависимости и перезапускает сервис. Перед каждым обновлением он создаёт согласованный backup SQLite. Затем проверяет настоящий HTTPS endpoint и только после этого регистрирует webhook. Конфиг и база находятся вне репозитория, поэтому `git pull` не стирает токены и историю.
+Скрипт копирует новый код в `/opt/calories-bot/app`, обновляет зависимости, создаёт backup SQLite и перезапускает сервис. Конфиг и база находятся вне репозитория, поэтому `git pull` не стирает токены и историю.
+
+### Режимы Telegram
+
+- `polling` — по умолчанию; без домена, HTTPS и входящих портов. Подходит для одного экземпляра бота.
+- `webhook` — нужен только если есть домен. Setup спросит домен, поднимет Caddy, HTTPS и webhook.
 
 ## Выбор модели или внешнего «агента» по API
 
@@ -36,7 +41,7 @@ git pull && sudo ./deploy.sh deploy
 
 | Что спросит setup | Пример |
 |---|---|
-| URL API | `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `http://127.0.0.1:11434/v1` |
+| URL API | Gemini по умолчанию; либо `https://api.openai.com/v1`, `https://openrouter.ai/api/v1`, `http://127.0.0.1:11434/v1` |
 | API key | ключ выбранного сервиса |
 | ID модели | `gpt-4o-mini`, `google/gemini-2.5-flash`, имя локальной модели |
 
@@ -66,7 +71,7 @@ LLM_TEMPERATURE=
 ```env
 LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 LLM_API_KEY=AIza_ВСТАВЬ_СВОЙ_КЛЮЧ
-LLM_MODEL=gemini-3.6-flash
+LLM_MODEL=gemini-3.5-flash-lite
 LLM_STRUCTURED_OUTPUT=auto
 LLM_TEMPERATURE=
 ```
