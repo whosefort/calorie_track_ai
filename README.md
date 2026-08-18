@@ -66,7 +66,7 @@ LLM_TEMPERATURE=
 ```env
 LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 LLM_API_KEY=AIza_ВСТАВЬ_СВОЙ_КЛЮЧ
-LLM_MODEL=gemini-3.7-flash
+LLM_MODEL=gemini-3.6-flash
 LLM_STRUCTURED_OUTPUT=auto
 LLM_TEMPERATURE=
 ```
