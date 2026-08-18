@@ -184,7 +184,7 @@ verify_default_gemini_config() {
   # предлагает по умолчанию. Для другого OpenAI-compatible API не гадаем.
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  [[ "${LLM_BASE_URL:-}" == "https://generativelanguage.googleapis.com/v1beta/openai/" ]] || return
+  [[ "${LLM_BASE_URL:-}" == "https://generativelanguage.googleapis.com/v1beta/openai/" ]] || return 0
   local result
   result="$(curl --fail-with-body --silent --show-error \
     -H "Authorization: Bearer ${LLM_API_KEY}" \
@@ -209,7 +209,7 @@ disable_webhook() {
 backup_database() {
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  [[ -f "${DATABASE_PATH:-}" ]] || return
+  [[ -f "${DATABASE_PATH:-}" ]] || return 0
   local backup_dir="${DATA_DIR}/backups"
   local backup_file="${backup_dir}/calories-$(date +%Y%m%d-%H%M%S).sqlite3"
   install -d -o "$APP_USER" -g "$APP_USER" -m 700 "$backup_dir"
@@ -228,7 +228,7 @@ wait_for_https() {
   for attempt in {1..24}; do
     if curl --fail --silent --show-error --connect-timeout 5 --max-time 10 "$url" >/dev/null; then
       log "HTTPS доступен: $url"
-      return
+      return 0
     fi
     sleep 5
   done
