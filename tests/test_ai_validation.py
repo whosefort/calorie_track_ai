@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import sqlite3
 import stat
@@ -125,6 +126,12 @@ class AiValidationTest(unittest.TestCase):
             index.LLM_TEMPERATURE_RAW = original_temperature
 
         self.assertNotIn("temperature", captured)
+
+    def test_gemini_compatible_schema_and_fallback_template(self):
+        schema = json.dumps(index.OUTPUT_SCHEMA)
+        self.assertNotIn("minLength", schema)
+        self.assertNotIn("maxLength", schema)
+        self.assertIn('"total":{"protein_g"', index.DEFAULT_SYSTEM_PROMPT)
 
     def test_webhook_rejects_missing_secret(self):
         with self.assertRaises(PermissionError):

@@ -556,13 +556,15 @@ OUTPUT_SCHEMA = {
                     "required": ["meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g", "portion_note"],
                     "properties": {
                         "meal_type": {"anyOf": [{"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]}, {"type": "null"}]},
-                        "name": {"type": "string", "minLength": 1, "maxLength": MAX_AI_TEXT_LENGTH},
+                        # Gemini OpenAI-совместимый API отклоняет minLength/maxLength;
+                        # ограничения всё равно строго проверяются validate_ai_response.
+                        "name": {"type": "string"},
                         "weight_g": {"type": "number", "minimum": 0},
                         "kcal": {"type": "number", "minimum": 0},
                         "protein_g": {"type": "number", "minimum": 0},
                         "fat_g": {"type": "number", "minimum": 0},
                         "carb_g": {"type": "number", "minimum": 0},
-                        "portion_note": {"type": "string", "maxLength": MAX_AI_TEXT_LENGTH},
+                        "portion_note": {"type": "string"},
                     },
                 },
             },
@@ -577,7 +579,7 @@ OUTPUT_SCHEMA = {
                     "carb_g": {"type": "number", "minimum": 0},
                 },
             },
-            "tip": {"type": "string", "maxLength": MAX_AI_TIP_LENGTH},
+            "tip": {"type": "string"},
         },
     },
 }
@@ -606,7 +608,10 @@ DEFAULT_SYSTEM_PROMPT = """Ты — детерминированный каль�
 Шаблон item (все ключи обязательны):
 {"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}
 
-Верни только один JSON-объект по Schema: без Markdown, текста до/после, комментариев, лишних ключей и code fence."""
+Точный шаблон корневого объекта (все четыре ключа обязательны):
+{"items":[{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}],"total_kcal":100,"total":{"protein_g":1.0,"fat_g":1.0,"carb_g":1.0},"tip":"Короткая подсказка"}
+
+Не используй total_protein_g, total_fat_g, total_carb_g или meal_type на верхнем уровне. Верни только один JSON-объект по этому шаблону: без Markdown, текста до/после, комментариев, лишних ключей и code fence."""
 
 
 def _parse_json_strict(content: str) -> dict:
