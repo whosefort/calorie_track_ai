@@ -18,7 +18,7 @@ chmod +x deploy.sh
 sudo ./deploy.sh setup
 ```
 
-`setup` по умолчанию выберет polling, Gemini API и `gemini-3.5-flash-lite`. Нужно вставить токен Telegram, ключ Gemini и при желании свой Telegram `user_id`. Конфиг сохранится в `/etc/calories-bot/calories-bot.env` с правами `600`.
+`setup` по умолчанию выберет polling, Gemini API и `gemini-3.5-flash-lite`. Во всех вопросах с выбором вводи номер: `1` — первый вариант, `2` — второй; Enter выбирает вариант в квадратных скобках. Поля с «Вставь» принимают значение целиком. Нужно вставить токен Telegram, ключ Gemini и при желании свой Telegram `user_id`. Конфиг сохранится в `/etc/calories-bot/calories-bot.env` с правами `600`.
 
 Ключ вставляй **без** `Bearer`, `export` и кавычек. Например, `AIza...`, а не `Authorization: Bearer AIza...`. Скрипт проверит Telegram-токен и для Gemini — пару «ключ + модель»; polling сам отключит старый webhook, но не удалит ожидающие сообщения.
 

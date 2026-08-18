@@ -63,12 +63,18 @@ setup_config() {
   chmod 700 "$DATA_DIR"
   if [[ -f "$CONFIG_FILE" ]]; then
     warn "Конфиг уже существует: $CONFIG_FILE"
-    read -r -p "Перезаписать его? [y/N] " answer
-    [[ "$answer" =~ ^[Yy]$ ]] || return
+    read -r -p "Конфиг: 1) оставить текущий, 2) перезаписать [1]: " answer
+    case "$answer" in
+      ""|1|n|N|no|No) return ;;
+      2|y|Y|yes|Yes) ;;
+      *) fail "Введи 1 (оставить) или 2 (перезаписать)" ;;
+    esac
   fi
 
   local token mode secret users base_url api_key model schema domain
-  read -r -s -p "Telegram bot token: " token; printf '\n'
+  printf '\nПодсказка: в вопросах с вариантами введи номер; Enter оставляет вариант по умолчанию.\n'
+  printf 'В полях «вставь» вводи значение целиком, без кавычек и Bearer.\n\n'
+  read -r -s -p "Вставь Telegram bot token: " token; printf '\n'
   read -r -p "Режим Telegram: 1) без домена (рекомендуется), 2) webhook с доменом [1]: " mode
   case "$mode" in
     ""|1|polling|pooling|"polling без домена"|"pooling без домена") mode="polling" ;;
@@ -76,19 +82,23 @@ setup_config() {
     *) fail "Введи 1 (без домена) или 2 (webhook с доменом)" ;;
   esac
   if [[ "$mode" == "webhook" ]]; then
-    read -r -s -p "Webhook secret (Enter = сгенерировать): " secret; printf '\n'
+    read -r -s -p "Вставь webhook secret или Enter для генерации: " secret; printf '\n'
     [[ -n "$secret" ]] || secret="$(openssl rand -hex 24)"
   fi
-  read -r -p "Разрешённые Telegram user_id (через запятую, Enter = все): " users
-  read -r -p "URL API [Gemini: https://generativelanguage.googleapis.com/v1beta/openai/]: " base_url
+  read -r -p "Вставь разрешённые Telegram user_id через запятую или Enter для всех: " users
+  read -r -p "Вставь URL API или Enter для Gemini: " base_url
   base_url="${base_url:-https://generativelanguage.googleapis.com/v1beta/openai/}"
-  read -r -s -p "API key (Gemini по умолчанию; только ключ, без Bearer): " api_key; printf '\n'
-  read -r -p "ID модели [gemini-3.5-flash-lite]: " model
+  read -r -s -p "Вставь API key (без Bearer): " api_key; printf '\n'
+  read -r -p "Вставь ID модели или Enter для gemini-3.5-flash-lite: " model
   model="${model:-gemini-3.5-flash-lite}"
-  read -r -p "JSON Schema mode [auto recommended/strict, auto]: " schema
-  schema="${schema:-auto}"
+  read -r -p "Формат ответа: 1) auto — совместимый и рекомендуемый, 2) strict — только JSON Schema [1]: " schema
+  case "$schema" in
+    ""|1|auto) schema="auto" ;;
+    2|strict) schema="strict" ;;
+    *) fail "Введи 1 (auto) или 2 (strict)" ;;
+  esac
   if [[ "$mode" == "webhook" ]]; then
-    read -r -p "Домен с A/AAAA-записью на этот VPS: " domain
+    read -r -p "Вставь домен с A/AAAA-записью на этот VPS: " domain
   fi
 
   [[ -n "$token" ]] || fail "Telegram token не может быть пустым"
