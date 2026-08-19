@@ -2,6 +2,7 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import requests
@@ -11,6 +12,15 @@ from index import TELEGRAM_API, process_polled_update
 logger = logging.getLogger(__name__)
 POLL_TIMEOUT = 50
 POLL_RETRY_DELAY = 3
+# Обработка сообщения может ждать AI (до ~2×AI_TIMEOUT секунд на ретрай).
+# Без пула это ждали бы ВСЕ остальные updates — включая команды без AI
+# (кнопки, /today, /history) и сообщения других чатов — потому что
+# следующий getUpdates() не вызывался бы, пока не обработан текущий.
+# Пул небольшой: SQLite и бесплатный лимит LLM API не рассчитаны на десятки
+# параллельных запросов личного бота.
+WORKER_THREADS = 8
+
+_executor = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="update")
 
 
 def get_updates(offset: Optional[int]) -> list[dict]:
@@ -35,18 +45,30 @@ def get_updates(offset: Optional[int]) -> list[dict]:
     return updates
 
 
+def _process_update_safe(update: dict) -> None:
+    try:
+        process_polled_update(update)
+    except Exception:
+        logger.exception("polled Telegram update processing failed")
+
+
 def process_updates(updates: list[dict], offset: Optional[int]) -> Optional[int]:
-    """Возвращает offset, подтверждающий каждый полученный update."""
+    """Ставит каждый update в пул воркеров и сразу возвращает offset для
+    следующего getUpdates — не дожидаясь завершения обработки. Иначе один
+    медленный AI-запрос (еда) блокировал бы доставку всех прочих updates,
+    даже тех, которым AI вообще не требуется (кнопки, /today, /history).
+
+    claim_update (SQLite) страхует от повторной обработки, поэтому продвигать
+    offset до завершения обработки безопасно: подтверждение update Telegram'у
+    и его идемпотентная обработка — разные, независимые гарантии.
+    """
     next_offset = offset
     for update in updates:
         update_id = update.get("update_id")
         if not isinstance(update_id, int) or isinstance(update_id, bool):
             logger.warning("ignored polled update without a valid update_id")
             continue
-        try:
-            process_polled_update(update)
-        except Exception:
-            logger.exception("polled Telegram update processing failed")
+        _executor.submit(_process_update_safe, update)
         next_offset = max(next_offset or update_id + 1, update_id + 1)
     return next_offset
 

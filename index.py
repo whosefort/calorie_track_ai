@@ -123,14 +123,24 @@ _validate_env()
 # LLM КЛИЕНТ
 # ============================================================================
 
+_ai_client: openai.OpenAI = None
+
+
 def _get_ai_client() -> openai.OpenAI:
-    return openai.OpenAI(
-        api_key=LLM_API_KEY,
-        base_url=LLM_BASE_URL,
-        # Ретраи контролируются в call_ai, чтобы не превысить timeout Telegram.
-        max_retries=0,
-        timeout=AI_TIMEOUT,
-    )
+    """Единый клиент на процесс: переиспользует HTTP keep-alive соединение,
+    а не платит новым TCP+TLS хендшейком на каждый вызов модели.
+    openai.OpenAI thread-safe (обёртка над httpx.Client) — безопасно делить
+    между воркерами при параллельной обработке updates."""
+    global _ai_client
+    if _ai_client is None:
+        _ai_client = openai.OpenAI(
+            api_key=LLM_API_KEY,
+            base_url=LLM_BASE_URL,
+            # Ретраи контролируются в call_ai, чтобы не превысить timeout Telegram.
+            max_retries=0,
+            timeout=AI_TIMEOUT,
+        )
+    return _ai_client
 
 
 def _get_temperature():
