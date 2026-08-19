@@ -1,9 +1,36 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# First run: sudo ./deploy.sh setup
-# Updates:   git pull && sudo ./deploy.sh deploy
-# Secrets and SQLite live outside git, so a pull never overwrites them.
+# =============================================================================
+# calories-bot — установка и обновление на VPS (Debian/Ubuntu).
+#
+# Команды:
+#   sudo ./deploy.sh setup     Первый запуск: ставит зависимости, спрашивает
+#                              токены/ключи в диалоге, поднимает сервис.
+#   sudo ./deploy.sh deploy    Обновление: git pull уже сделан, этот шаг
+#                              копирует код, ставит зависимости, рестартует.
+#                              Конфиг и БД не трогает.
+#   sudo ./deploy.sh status    Статус systemd-сервиса (то же что systemctl status).
+#   sudo ./deploy.sh logs      Живые логи бота (Ctrl+C для выхода).
+#   sudo ./deploy.sh restart   Просто перезапустить сервис без пересборки кода.
+#
+# Обычный сценарий обновления кода:
+#   git pull && sudo ./deploy.sh deploy
+#
+# Два режима работы бота (выбираются в setup, хранятся в конфиге):
+#   polling  — бот сам опрашивает Telegram. Не нужен домен, HTTPS, открытые
+#              порты. Рекомендуется, если нет отдельного домена под бота.
+#   webhook  — Telegram сам стучится к боту по HTTPS. Нужен домен с
+#              A/AAAA-записью на этот VPS; deploy.sh поднимет Caddy для TLS.
+#
+# Где что лежит (всё вне git — git pull это не стирает):
+#   Код:      /opt/calories-bot/app        (перезаписывается каждым deploy)
+#   Конфиг:   /etc/calories-bot/calories-bot.env   (права 600, только root)
+#   БД:       /var/lib/calories-bot/calories.sqlite3
+#   Бэкапы:   /var/lib/calories-bot/backups/  (делаются автоматически при deploy)
+#   Сервис:   systemctl {status|restart|stop} calories-bot
+#   Логи:     journalctl -u calories-bot -f
+# =============================================================================
 
 APP_NAME="calories-bot"
 APP_USER="calories-bot"
@@ -22,6 +49,20 @@ SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log()  { printf '\033[0;32m[✓]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 fail() { printf '\033[0;31m[✗]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Использование: sudo ./deploy.sh <команда>
+
+  setup     Первый запуск: диалог с вопросами + установка сервиса
+  deploy    Обновить код после git pull (конфиг и БД не трогает)
+  status    Статус сервиса
+  logs      Живые логи бота (Ctrl+C — выход)
+  restart   Перезапустить сервис без пересборки кода
+
+Пример обновления: git pull && sudo ./deploy.sh deploy
+EOF
+}
 
 require_root() { [[ "${EUID}" -eq 0 ]] || fail "Запусти: sudo ./deploy.sh $COMMAND"; }
 valid_domain() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ && "$1" == *.* ]]; }
@@ -275,7 +316,7 @@ deploy() {
   log "Готово. Логи: journalctl -u ${APP_NAME} -f"
 }
 
-COMMAND="${1:-deploy}"
+COMMAND="${1:-}"
 case "$COMMAND" in
   setup)
     require_root
@@ -294,5 +335,22 @@ case "$COMMAND" in
     require_root
     systemctl --no-pager status "$APP_NAME"
     ;;
-  *) fail "Использование: sudo ./deploy.sh {setup|deploy|status}" ;;
+  logs)
+    require_root
+    journalctl -u "$APP_NAME" -f
+    ;;
+  restart)
+    require_root
+    systemctl restart "$APP_NAME"
+    log "Сервис перезапущен"
+    systemctl --no-pager --full status "$APP_NAME"
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    warn "Неизвестная команда: $COMMAND"
+    usage
+    exit 1
+    ;;
 esac
