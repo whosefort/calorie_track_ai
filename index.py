@@ -1558,10 +1558,18 @@ def _process_telegram_update(body: dict) -> None:
 
     cb = body.get("callback_query")
     if cb:
-        cq_id = cb["id"]
-        user_id = cb["from"]["id"]
-        chat_id = cb["message"]["chat"]["id"]
+        cq_id = cb.get("id")
+        user_id = (cb.get("from") or {}).get("id")
+        # "message" в callback_query необязательное поле Telegram API — его
+        # нет, если исходное сообщение с кнопкой устарело или удалено. Прямой
+        # cb["message"]["chat"]["id"] падал с KeyError на каждый клик по такой
+        # кнопке. У этого бота все inline-клавиатуры живут в приватном чате,
+        # поэтому user_id безопасно использовать как chat_id, если message нет.
+        chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id", user_id)
         data = cb.get("data", "")
+        if not isinstance(cq_id, str) or not isinstance(user_id, int) or chat_id is None:
+            logger.warning("malformed callback_query, ignoring: %s", cb)
+            return
         if ALLOWED_USERS_INVALID or (ALLOWED_USERS and user_id not in ALLOWED_USERS):
             tg_answer_callback(cq_id, "Нет доступа.")
             return
