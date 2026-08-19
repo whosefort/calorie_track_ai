@@ -161,19 +161,32 @@ def _get_temperature():
 # SQLITE (локальная БД VPS)
 # ============================================================================
 
+# Пути, для которых права уже выставлены — чтобы не делать mkdir/chmod
+# (несколько лишних syscall) на КАЖДЫЙ вызов _db(), которых на одно
+# сообщение приходится до ~5. С параллельной обработкой updates (пул
+# потоков в polling.py) это иначе умножается на число воркеров одновременно.
+# -wal/-shm создаются SQLite не сразу, поэтому для них просто повторяем
+# попытку, пока файл не появится и не будет один раз chmod'нут.
+_chmod_done: set = set()
+
+
 @contextmanager
 def _db():
     directory = os.path.dirname(DATABASE_PATH)
-    if directory:
+    if directory and directory not in _chmod_done:
         os.makedirs(directory, mode=0o700, exist_ok=True)
         os.chmod(directory, 0o700)
+        _chmod_done.add(directory)
     conn = sqlite3.connect(DATABASE_PATH, timeout=10)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         for path in (DATABASE_PATH, f"{DATABASE_PATH}-wal", f"{DATABASE_PATH}-shm"):
+            if path in _chmod_done:
+                continue
             try:
                 os.chmod(path, 0o600)
+                _chmod_done.add(path)
             except FileNotFoundError:
                 pass
         yield conn
@@ -427,7 +440,14 @@ def claim_update(update_id: int) -> bool:
     """Атомарно резервирует update Telegram, устраняя его повторную обработку."""
     now = int(datetime.now(timezone.utc).timestamp())
     with _db() as conn:
-        conn.execute("DELETE FROM processed_updates WHERE received_at < ?", (now - 30 * 86400,))
+        # Чистим старьё не на каждый update: с параллельной обработкой
+        # (polling.py гонит несколько update через пул потоков) безусловный
+        # DELETE на КАЖДЫЙ вызов означал, что почти одновременные апдейты
+        # выстраивались в очередь за единственным SQLite-writer'ом ради
+        # операции, которая нужна редко. update_id монотонно растёт у
+        # Telegram, поэтому раз в ~50 апдейтов достаточно для 30-дневного TTL.
+        if update_id % 50 == 0:
+            conn.execute("DELETE FROM processed_updates WHERE received_at < ?", (now - 30 * 86400,))
         cursor = conn.execute(
             "INSERT OR IGNORE INTO processed_updates (update_id, received_at) VALUES (?, ?)",
             (update_id, now),
