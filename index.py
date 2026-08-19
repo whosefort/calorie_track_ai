@@ -93,6 +93,8 @@ MAX_DAY_ENTRIES    = 20
 MAX_AI_ITEMS        = 30
 MAX_AI_TEXT_LENGTH  = 160
 MAX_AI_TIP_LENGTH   = 300
+MAX_AI_NOTE_LENGTH  = 240   # пометка о блюде: ~30 слов с запасом
+MAX_FORBIDDEN_LENGTH = 400  # список «не ем», хранимый на пользователя
 
 
 # Валидируем критичные env-переменные при импорте — лучше понятный лог на
@@ -196,6 +198,10 @@ def init_db() -> None:
                 kind TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 ts INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_prefs (
+                user_id INTEGER PRIMARY KEY,
+                forbidden TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS processed_updates (
                 update_id INTEGER PRIMARY KEY,
@@ -339,7 +345,7 @@ def delete_day(user_id: int, date_utc: str) -> int:
 # сменой ожидания не нужен.
 # ---------------------------------------------------------------------------
 
-_PENDING_TTL = {"rewrite": 300, "meal": 600}
+_PENDING_TTL = {"rewrite": 300, "meal": 600, "forbidden": 600}
 
 
 def save_pending(user_id: int, kind: str, payload: str) -> None:
@@ -378,6 +384,33 @@ def clear_pending(user_id: int) -> None:
             conn.execute("DELETE FROM pending_state WHERE user_id = ?", (user_id,))
     except Exception as e:
         logger.error(f"clear_pending: {e}")
+
+
+def get_forbidden(user_id: int) -> str:
+    """Список продуктов, которые пользователь не ест (строка как ввёл юзер)."""
+    try:
+        with _db() as conn:
+            row = conn.execute("SELECT forbidden FROM user_prefs WHERE user_id = ?",
+                               (user_id,)).fetchone()
+        return (row["forbidden"] if row else "") or ""
+    except Exception as e:
+        logger.error(f"get_forbidden: {e}")
+        return ""
+
+
+def save_forbidden(user_id: int, forbidden: str) -> None:
+    try:
+        with _db() as conn:
+            conn.execute("""
+                INSERT INTO user_prefs (user_id, forbidden) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET forbidden = excluded.forbidden
+            """, (user_id, forbidden[:MAX_FORBIDDEN_LENGTH]))
+    except Exception as e:
+        logger.error(f"save_forbidden: {e}")
+
+
+def clear_forbidden(user_id: int) -> None:
+    save_forbidden(user_id, "")
 
 
 def claim_update(update_id: int) -> bool:
@@ -441,7 +474,7 @@ def validate_ai_response(data: dict) -> bool:
     if not isinstance(data, dict):
         logger.error("AI response is not a dict")
         return False
-    required_root = {"items", "total_kcal", "total", "tip"}
+    required_root = {"items", "total_kcal", "total", "tip", "note"}
     if set(data) != required_root:
         logger.error(f"AI root keys must be {required_root}, got={set(data)}")
         return False
@@ -467,6 +500,9 @@ def validate_ai_response(data: dict) -> bool:
         return False
     if not isinstance(data["tip"], str) or len(data["tip"]) > MAX_AI_TIP_LENGTH:
         logger.error("AI response has invalid tip")
+        return False
+    if not isinstance(data["note"], str) or len(data["note"]) > MAX_AI_NOTE_LENGTH:
+        logger.error("AI response has invalid note")
         return False
     required = {"meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g", "portion_note"}
     for i, item in enumerate(data["items"]):
@@ -545,7 +581,7 @@ OUTPUT_SCHEMA = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["items", "total_kcal", "total", "tip"],
+        "required": ["items", "total_kcal", "total", "tip", "note"],
         "properties": {
             "items": {
                 "type": "array",
@@ -580,6 +616,9 @@ OUTPUT_SCHEMA = {
                 },
             },
             "tip": {"type": "string"},
+            # note: короткая пометка о блюде (до ~30 слов). Длина строго
+            # проверяется в validate_ai_response (Gemini отклоняет maxLength).
+            "note": {"type": "string"},
         },
     },
 }
@@ -598,18 +637,20 @@ DEFAULT_SYSTEM_PROMPT = """Ты — детерминированный каль�
 - Отдельные продукты с разным составом или массой — отдельные items. Учитывай упомянутые масло, соусы, сахар, напитки и алкоголь.
 - meal_type: breakfast, lunch, dinner, snack только когда это прямо известно из сообщения или контекста; иначе null.
 - Не выдумывай производителя или источник. Не утверждай, что проверил упаковку или сайт, если пользователь их не дал.
+- note: всегда заполняй короткой, но понятной пометкой о блюде — до 30 слов (одна-две фразы, не обрывок). Уместны: баланс БЖУ, полезность, чего не хватает, простой совет. Если владелец передал список продуктов, которые пользователь не ест, и блюдо их содержит — обязательно предупреди об этом в note. Пиши по-русски, без Markdown.
 
 Перед ответом молча проверь:
 - У каждого item есть ровно meal_type, name, weight_g, kcal, protein_g, fat_g, carb_g, portion_note.
 - weight_g > 0; kcal — целое; weight_g и БЖУ имеют не более одного знака после запятой; все числа — JSON-числа, не строки.
 - total_kcal точно равен сумме kcal items; total БЖУ точно равны суммам items.
-- Если еды нет: items=[], все итоги 0, tip — короткая подсказка.
+- note заполнен всегда (даже без еды), не длиннее 30 слов.
+- Если еды нет: items=[], все итоги 0, tip — короткая подсказка, note — короткий дружелюбный комментарий.
 
 Шаблон item (все ключи обязательны):
 {"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}
 
-Точный шаблон корневого объекта (все четыре ключа обязательны):
-{"items":[{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}],"total_kcal":100,"total":{"protein_g":1.0,"fat_g":1.0,"carb_g":1.0},"tip":"Короткая подсказка"}
+Точный шаблон корневого объекта (все пять ключей обязательны):
+{"items":[{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}],"total_kcal":100,"total":{"protein_g":1.0,"fat_g":1.0,"carb_g":1.0},"tip":"Короткая подсказка","note":"Сбалансированное блюдо, белка достаточно."}
 
 Не используй total_protein_g, total_fat_g, total_carb_g или meal_type на верхнем уровне. Верни только один JSON-объект по этому шаблону: без Markdown, текста до/после, комментариев, лишних ключей и code fence."""
 
@@ -620,15 +661,21 @@ def _parse_json_strict(content: str) -> dict:
     return json.loads(content, parse_constant=reject_constant)
 
 
-def _request_completion(user_message: str, structured: bool) -> str:
+def _request_completion(user_message: str, structured: bool, extra_system: str = None) -> str:
     """Один OpenAI-compatible Chat Completions запрос.
 
     Это намеренно стандартный API: смена провайдера сводится к LLM_BASE_URL,
     LLM_API_KEY и LLM_MODEL, без изменений кода бота.
+
+    extra_system — динамический контекст владельца на конкретный запрос
+    (например, персональный список «не ест»). Идёт в system, а не в user,
+    чтобы модель не приняла его за данные о съеденной еде.
     """
     system_prompt = DEFAULT_SYSTEM_PROMPT
     if LLM_SYSTEM_PROMPT:
         system_prompt += "\n\nДополнительные инструкции владельца (они не отменяют правила формата и расчёта выше):\n" + LLM_SYSTEM_PROMPT
+    if extra_system:
+        system_prompt += "\n\nКонтекст пользователя (не отменяет правила формата и расчёта выше):\n" + extra_system
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
@@ -646,18 +693,18 @@ def _request_completion(user_message: str, structured: bool) -> str:
     return content
 
 
-def _call_ai_once(user_message: str) -> dict:
+def _call_ai_once(user_message: str, extra_system: str = None) -> dict:
     """Один вызов AI без ретрая. Возбуждает JSONDecodeError или ValueError."""
     use_schema = LLM_STRUCTURED_OUTPUT in {"auto", "strict"}
     try:
-        raw = _request_completion(user_message, structured=use_schema)
+        raw = _request_completion(user_message, structured=use_schema, extra_system=extra_system)
     except Exception:
         # У части совместимых API (например, старых локальных серверов) ещё
         # нет json_schema. В strict-режиме это намеренная ошибка конфигурации.
         if not use_schema or LLM_STRUCTURED_OUTPUT == "strict":
             raise
         logger.warning("Provider rejected JSON Schema; using JSON-only fallback", exc_info=True)
-        raw = _request_completion(user_message, structured=False)
+        raw = _request_completion(user_message, structured=False, extra_system=extra_system)
     logger.debug("AI response received (%s chars)", len(raw))
 
     try:
@@ -691,22 +738,22 @@ _RETRY_PREFIX = (
     "Запрос пользователя:\n"
 )
 
-def call_ai(user_message: str) -> dict:
+def call_ai(user_message: str, extra_system: str = None) -> dict:
     """Вызывает AI агента с автоматическим ретраем при ошибке парсинга."""
     logger.info("AI call requested (%s chars)", len(user_message))
     try:
-        return _call_ai_once(user_message)
+        return _call_ai_once(user_message, extra_system=extra_system)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"AI attempt 1 failed ({type(e).__name__}), retrying with explicit JSON prompt")
         # На ретрае явно напоминаем модели про JSON-only формат
-        return _call_ai_once(_RETRY_PREFIX + user_message)
+        return _call_ai_once(_RETRY_PREFIX + user_message, extra_system=extra_system)
 
 
-def _safe_call_ai(chat_id: int, text: str, context: str = ""):
+def _safe_call_ai(chat_id: int, text: str, context: str = "", extra_system: str = None):
     """call_ai с единой обработкой ошибок. Возвращает dict, либо None —
     в этом случае пользователю уже отправлено сообщение об ошибке."""
     try:
-        return call_ai(text)
+        return call_ai(text, extra_system=extra_system)
     except json.JSONDecodeError:
         tg_send_mk(chat_id, "Не смог распознать ответ агента. Переформулируй.")
     except ValueError:
@@ -726,24 +773,25 @@ def _safe_call_ai(chat_id: int, text: str, context: str = ""):
 # Постоянная Reply-клавиатура (всегда видна внизу чата)
 # ---------------------------------------------------------------------------
 
-BTN_ADD      = "➕ Добавить"       # выбор приёма через inline-кнопки
-BTN_DAY_LOG  = "📝 Весь день"      # записать полный рацион за сегодня
-BTN_TODAY    = "📊 Сегодня"        # сводка за сегодня
-BTN_HISTORY  = "📋 История"        # последние 10 записей
-BTN_REWRITE  = "✏️ Переписать"     # переписать рацион за выбранный день
+BTN_ADD       = "➕ Добавить"       # выбор приёма через inline-кнопки
+BTN_DAY_LOG   = "📝 Весь день"      # записать полный рацион за сегодня
+BTN_TODAY     = "📊 Сегодня"        # сводка за сегодня
+BTN_HISTORY   = "📋 История"        # последние 10 записей
+BTN_REWRITE   = "✏️ Переписать"     # переписать рацион за выбранный день
+BTN_FORBIDDEN = "🚫 Не ем"          # список продуктов, которые пользователь не ест
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [BTN_ADD,    BTN_DAY_LOG],
-        [BTN_TODAY,  BTN_HISTORY],
-        [BTN_REWRITE],
+        [BTN_ADD,     BTN_DAY_LOG],
+        [BTN_TODAY,   BTN_HISTORY],
+        [BTN_REWRITE, BTN_FORBIDDEN],
     ],
     "resize_keyboard": True,
     "is_persistent":   True,   # клавиатура остаётся видимой между сообщениями
 }
 
 # Все тексты кнопок — для маршрутизации в route_message
-_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE}
+_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE, BTN_FORBIDDEN}
 
 
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown",
@@ -873,6 +921,40 @@ def handle_add_meal_callback(chat_id: int, user_id: int,
     save_pending(user_id, "meal", meal_type)
     prompt = MEAL_PROMPT_TEXT.get(meal_type, "Пиши что ел:")
     tg_send(chat_id, f"{prompt}\n\n_Или /cancel чтобы отменить_")
+
+
+def show_forbidden(chat_id: int, user_id: int) -> None:
+    """Показывает текущий список «не ем» с inline-кнопками управления."""
+    forbidden = get_forbidden(user_id).strip()
+    if forbidden:
+        text = (f"🚫 *Ты не ешь:*\n{_escape_markdown(forbidden)}\n\n"
+                f"Я предупреждаю, если это попадает в блюдо. Что сделать?")
+        buttons = [[
+            {"text": "✏️ Изменить", "callback_data": "forbidden:edit"},
+            {"text": "🗑 Очистить",  "callback_data": "forbidden:clear"},
+        ]]
+    else:
+        text = ("🚫 *Список «не ем» пуст.*\n\n"
+                "Добавь продукты, которые не ешь — и я буду предупреждать, "
+                "если они окажутся в блюде.")
+        buttons = [[{"text": "➕ Задать список", "callback_data": "forbidden:edit"}]]
+    tg_send_keyboard(chat_id, text, buttons)
+
+
+def handle_forbidden_callback(chat_id: int, user_id: int,
+                              callback_query_id: str, action: str) -> None:
+    """Обрабатывает inline-кнопки экрана «Не ем»: изменить / очистить."""
+    tg_answer_callback(callback_query_id)
+    if action == "edit":
+        save_pending(user_id, "forbidden", "")
+        tg_send(chat_id,
+            "Напиши одним сообщением, что ты *не ешь* — через запятую.\n"
+            "_Например: молоко, грибы, свинина, кинза_\n\n"
+            "_Это заменит текущий список целиком. Или /cancel чтобы отменить._"
+        )
+    elif action == "clear":
+        clear_forbidden(user_id)
+        tg_send_mk(chat_id, "🚫 Список «не ем» очищен.")
 
 
 # ============================================================================
@@ -1050,6 +1132,9 @@ def format_ai_response(data: dict) -> str:
         f"У {_fmt(t.get('carb_g', 0))}"
     )
 
+    if data.get("note"):
+        lines.append(f"\n📝 {_escape_markdown(data['note'])}")
+
     if data.get("tip"):
         lines.append(f"\n💡 {_escape_markdown(data['tip'])}")
 
@@ -1116,6 +1201,15 @@ def format_history(rows: list, max_days: int = 7) -> str:
 # БИЗНЕС-ЛОГИКА: подсчёт и перезапись
 # ============================================================================
 
+def _forbidden_context(user_id: int) -> str:
+    """Готовит системную подсказку про запреты пользователя, либо None."""
+    forbidden = get_forbidden(user_id).strip()
+    if not forbidden:
+        return None
+    return (f"Пользователь не ест (избегает): {forbidden}. "
+            f"Если блюдо содержит что-то из этого — обязательно предупреди в поле note.")
+
+
 def process_food_message(chat_id: int, user_id: int, text: str,
                          meal_type: str = None) -> None:
     """Считает калории нового приёма пищи и сохраняет в БД.
@@ -1150,7 +1244,7 @@ def process_food_message(chat_id: int, user_id: int, text: str,
         ai_input = MEAL_AI_PREFIX[meal_type] + text
         logger.info(f"meal_type hint: {meal_type!r}")
 
-    data = _safe_call_ai(chat_id, ai_input)
+    data = _safe_call_ai(chat_id, ai_input, extra_system=_forbidden_context(user_id))
     if data is None:
         release_food_request(reservation_id)
         return
@@ -1186,7 +1280,8 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
 
     tg_send(chat_id, f"Считаю калории для {date_utc}...")
 
-    data = _safe_call_ai(chat_id, text, context="rewrite")
+    data = _safe_call_ai(chat_id, text, context="rewrite",
+                         extra_system=_forbidden_context(user_id))
     if data is None:
         return
 
@@ -1229,7 +1324,8 @@ def handle_start(chat_id: int) -> None:
         "📝 *Весь день* — записать всё что ел сегодня одним сообщением\n"
         "📊 *Сегодня* — сводка за сегодня\n"
         "📋 *История* — последние 10 записей\n"
-        "✏️ *Переписать* — исправить рацион за выбранный день\n\n"
+        "✏️ *Переписать* — исправить рацион за выбранный день\n"
+        "🚫 *Не ем* — список продуктов, которые не ешь (предупрежу, если попадут в блюдо)\n\n"
         "_/cancel — отменить ожидающее действие_"
     ))
 
@@ -1345,6 +1441,11 @@ def route_message(message: dict) -> None:
             show_rewrite_keyboard(chat_id)
             return
 
+        if text == BTN_FORBIDDEN:
+            clear_pending(user_id)
+            show_forbidden(chat_id, user_id)
+            return
+
     # ── Pending-состояние ─────────────────────────────────────────────────
     # Один SELECT вместо двух: get_pending возвращает (kind, payload).
     if not text.startswith("/"):
@@ -1354,6 +1455,10 @@ def route_message(message: dict) -> None:
             clear_pending(user_id)
             if kind == "rewrite":
                 process_rewrite(chat_id, user_id, text, payload)
+            elif kind == "forbidden":
+                save_forbidden(user_id, text)
+                tg_send_mk(chat_id,
+                    f"🚫 Готово. Теперь ты не ешь:\n{_escape_markdown(text.strip())}")
             else:  # meal
                 process_food_message(chat_id, user_id, text, meal_type=payload)
             return
@@ -1434,6 +1539,8 @@ def _process_telegram_update(body: dict) -> None:
             handle_rewrite_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         elif data.startswith("add_meal:"):
             handle_add_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
+        elif data.startswith("forbidden:"):
+            handle_forbidden_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         return
 
     # edited_message намеренно игнорируется — это исключает дубли записей.
