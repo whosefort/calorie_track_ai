@@ -1,6 +1,7 @@
 """Long polling для Telegram: режим запуска без домена и входящих портов."""
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -19,6 +20,18 @@ POLL_RETRY_DELAY = 3
 # Пул небольшой: SQLite и бесплатный лимит LLM API не рассчитаны на десятки
 # параллельных запросов личного бота.
 WORKER_THREADS = 8
+
+# У ThreadPoolExecutor внутренняя очередь заданий НЕ ограничена. getUpdates
+# может вернуть до 100 апдейтов за раз; если их закидывать в пул без счёта,
+# а обрабатывать они успевают медленнее, чем прилетают (всплеск активности,
+# спам, просто медленный AI) — очередь и память растут без предела, и это
+# именно то, что раньше сдерживалось последовательной обработкой. Семафор
+# ограничивает число задач "в полёте": когда лимит достигнут, process_updates
+# (единственный поток опроса) сам ждёт на acquire() перед тем как принять
+# больше работы — то есть backpressure возвращается, но не ценой блокировки
+# на КАЖДОМ отдельном update, как было в исходном баге.
+_MAX_IN_FLIGHT = WORKER_THREADS * 4
+_in_flight = threading.BoundedSemaphore(_MAX_IN_FLIGHT)
 
 _executor = ThreadPoolExecutor(max_workers=WORKER_THREADS, thread_name_prefix="update")
 
@@ -50,6 +63,8 @@ def _process_update_safe(update: dict) -> None:
         process_polled_update(update)
     except Exception:
         logger.exception("polled Telegram update processing failed")
+    finally:
+        _in_flight.release()
 
 
 def process_updates(updates: list[dict], offset: Optional[int]) -> Optional[int]:
@@ -61,6 +76,11 @@ def process_updates(updates: list[dict], offset: Optional[int]) -> Optional[int]
     claim_update (SQLite) страхует от повторной обработки, поэтому продвигать
     offset до завершения обработки безопасно: подтверждение update Telegram'у
     и его идемпотентная обработка — разные, независимые гарантии.
+
+    _in_flight.acquire() ограничивает число одновременно поставленных задач:
+    если лимит достигнут, этот вызов блокируется до освобождения места — это
+    и есть backpressure, не позволяющий очереди пула расти без ограничений
+    под нагрузкой (см. комментарий у _MAX_IN_FLIGHT).
     """
     next_offset = offset
     for update in updates:
@@ -68,6 +88,7 @@ def process_updates(updates: list[dict], offset: Optional[int]) -> Optional[int]
         if not isinstance(update_id, int) or isinstance(update_id, bool):
             logger.warning("ignored polled update without a valid update_id")
             continue
+        _in_flight.acquire()
         _executor.submit(_process_update_safe, update)
         next_offset = max(next_offset or update_id + 1, update_id + 1)
     return next_offset
