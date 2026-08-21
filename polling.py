@@ -8,17 +8,50 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import requests
+from urllib3.util.retry import Retry
 
-from index import TELEGRAM_API, process_polled_update
+from index import TELEGRAM_API, KeepAliveAdapter, process_polled_update
 
 logger = logging.getLogger(__name__)
-POLL_TIMEOUT = 50
-POLL_RETRY_DELAY = 3
 
-# Отдельная сессия именно для long-poll: соединение держится открытым до 50с,
-# и мешать его в общий пул с исходящими sendMessage не стоит. Плюс keep-alive
-# избавляет от DNS+TLS на каждой итерации цикла.
-_poll_session = requests.Session()
+# 25с, а не 50: между запросами long-poll соединение не передаёт НИЧЕГО, и
+# это ровно то окно, в котором NAT/файрвол (частая история в контейнерах и у
+# облачных провайдеров, типичный idle-timeout 30-60с) тихо выбрасывает TCP-
+# сессию. Клиент об этом не узнаёт и продолжает ждать ответ в мёртвый сокет —
+# сообщение висит, пока не сработает таймаут. Более короткий цикл держит
+# состояние соединения свежим и ограничивает цену одной такой потери.
+POLL_TIMEOUT = 25
+POLL_RETRY_DELAY = 3
+# Read-таймаут должен быть заметно больше POLL_TIMEOUT (сервер сам держит
+# ответ до POLL_TIMEOUT), но не настолько, чтобы мёртвое соединение висело
+# минуту, прежде чем мы его заметим.
+POLL_READ_TIMEOUT = POLL_TIMEOUT + 10
+# Насколько цикл может превысить POLL_TIMEOUT, прежде чем это считается
+# аномалией (сетевой джиттер — норма, зависшее соединение — нет).
+POLL_SLOW_WARN_MARGIN = 3
+
+
+def _build_poll_session() -> requests.Session:
+    """Отдельная сессия именно для long-poll: соединение держится открытым
+    до POLL_TIMEOUT, и мешать его в общий пул с исходящими sendMessage не
+    стоит. Плюс keep-alive избавляет от DNS+TLS на каждой итерации цикла.
+
+    Ретрай на обрыве соединения здесь безопасен и нужен: getUpdates с тем же
+    offset идемпотентен (вернёт те же updates, а дубли отсекает claim_update),
+    зато без ретрая первая же протухшая keep-alive сессия после простоя даёт
+    исключение, три секунды сна и задержку доставки на ровном месте.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=2, connect=2, read=1, status=0,
+        backoff_factor=0.5,
+        allowed_methods=None,   # None = ретраить любые методы, включая POST
+    )
+    session.mount("https://", KeepAliveAdapter(max_retries=retry))
+    return session
+
+
+_poll_session = _build_poll_session()
 # Обработка сообщения может ждать AI (до ~2×AI_TIMEOUT секунд на ретрай).
 # Без пула это ждали бы ВСЕ остальные updates — включая команды без AI
 # (кнопки, /today, /history) и сообщения других чатов — потому что
@@ -52,7 +85,7 @@ def get_updates(offset: Optional[int]) -> list[dict]:
     response = _poll_session.post(
         f"{TELEGRAM_API}/getUpdates",
         json=payload,
-        timeout=POLL_TIMEOUT + 10,
+        timeout=POLL_READ_TIMEOUT,
     )
     # 409 = "terminated by other getUpdates request": тот же токен опрашивают
     # два процесса (например, не остановленный старый инстанс или вторая
@@ -122,7 +155,20 @@ def run() -> None:
     offset = None
     while True:
         try:
-            offset = process_updates(get_updates(offset), offset)
+            started = time.monotonic()
+            updates = get_updates(offset)
+            waited = time.monotonic() - started
+            # Штатный цикл: либо сразу с апдейтами, либо ровно POLL_TIMEOUT
+            # пустым. Заметно дольше — соединение висело в мёртвом сокете, и
+            # всё это время сообщения не доставлялись. Именно так выглядит
+            # "бот заснул и потом отмер": в логе будет видно, сколько он спал.
+            if waited > POLL_TIMEOUT + POLL_SLOW_WARN_MARGIN:
+                logger.warning(
+                    "getUpdates занял %.1fс при ожидаемых %sс — соединение, "
+                    "похоже, обрывалось; доставка на это время встала",
+                    waited, POLL_TIMEOUT,
+                )
+            offset = process_updates(updates, offset)
         except Exception:
             logger.exception("Telegram polling failed; retrying in %s seconds", POLL_RETRY_DELAY)
             time.sleep(POLL_RETRY_DELAY)

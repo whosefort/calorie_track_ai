@@ -12,9 +12,11 @@ import uuid
 import logging
 import sqlite3
 import hmac
+import socket
 import threading
 from contextlib import contextmanager
 import requests
+from urllib3.connection import HTTPConnection
 import openai
 from datetime import datetime, timezone, timedelta
 
@@ -147,6 +149,34 @@ def _get_ai_client() -> openai.OpenAI:
     return _ai_client
 
 
+def _keepalive_socket_options() -> list:
+    """TCP keep-alive: ядро само проверяет живость простаивающего соединения
+    и рвёт его при потере, вместо того чтобы ждать ответ, который уже некому
+    прислать. Соединение к Telegram может простаивать минутами между
+    сообщениями, а NAT/файрвол за это время успевает тихо его выбросить.
+    Константы TCP_KEEP* есть не на всех платформах — берём доступные."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    for name, value in (("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+        constant = getattr(socket, name, None)
+        if constant is not None:
+            options.append((socket.IPPROTO_TCP, constant, value))
+    return options
+
+
+class KeepAliveAdapter(requests.adapters.HTTPAdapter):
+    """HTTPAdapter с TCP keep-alive.
+
+    socket_options нельзя передать в HTTPAdapter напрямую — это параметр
+    пула urllib3, поэтому пробрасываем его в init_poolmanager.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["socket_options"] = (
+            HTTPConnection.default_socket_options + _keepalive_socket_options()
+        )
+        return super().init_poolmanager(*args, **kwargs)
+
+
 _tg_session: requests.Session = None
 
 
@@ -164,12 +194,12 @@ def tg_session() -> requests.Session:
         with _client_lock:
             if _tg_session is None:
                 session = requests.Session()
-                adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=4,
-                    pool_maxsize=16,
-                    max_retries=0,
-                )
-                session.mount("https://", adapter)
+                # max_retries=0: отправку сообщения повторять нельзя —
+                # ретрай после успешно доставленного, но потерянного ответа
+                # продублировал бы сообщение в чате.
+                session.mount("https://", KeepAliveAdapter(
+                    pool_connections=4, pool_maxsize=16, max_retries=0,
+                ))
                 _tg_session = session
     return _tg_session
 
