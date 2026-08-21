@@ -12,6 +12,7 @@ import uuid
 import logging
 import sqlite3
 import hmac
+import threading
 from contextlib import contextmanager
 import requests
 import openai
@@ -124,6 +125,7 @@ _validate_env()
 # ============================================================================
 
 _ai_client: openai.OpenAI = None
+_client_lock = threading.Lock()
 
 
 def _get_ai_client() -> openai.OpenAI:
@@ -133,14 +135,43 @@ def _get_ai_client() -> openai.OpenAI:
     между воркерами при параллельной обработке updates."""
     global _ai_client
     if _ai_client is None:
-        _ai_client = openai.OpenAI(
-            api_key=LLM_API_KEY,
-            base_url=LLM_BASE_URL,
-            # Ретраи контролируются в call_ai, чтобы не превысить timeout Telegram.
-            max_retries=0,
-            timeout=AI_TIMEOUT,
-        )
+        with _client_lock:
+            if _ai_client is None:
+                _ai_client = openai.OpenAI(
+                    api_key=LLM_API_KEY,
+                    base_url=LLM_BASE_URL,
+                    # Ретраи контролируются в call_ai, чтобы не превысить timeout Telegram.
+                    max_retries=0,
+                    timeout=AI_TIMEOUT,
+                )
     return _ai_client
+
+
+_tg_session: requests.Session = None
+
+
+def tg_session() -> requests.Session:
+    """Единая HTTP-сессия для вызовов Telegram API.
+
+    Без неё каждый requests.post открывал НОВОЕ соединение: DNS-резолв +
+    TCP + TLS-хендшейк на каждый вызов, а на одно сообщение бота приходится
+    2-3 вызова ("Считаю калории...", затем результат). В контейнере с
+    медленным DNS это давало секунды задержки на ровном месте и лишние
+    сокеты под нагрузкой. Пул рассчитан на воркеры polling.py.
+    """
+    global _tg_session
+    if _tg_session is None:
+        with _client_lock:
+            if _tg_session is None:
+                session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=4,
+                    pool_maxsize=16,
+                    max_retries=0,
+                )
+                session.mount("https://", adapter)
+                _tg_session = session
+    return _tg_session
 
 
 def _get_temperature():
@@ -180,7 +211,6 @@ def _db():
     conn = sqlite3.connect(DATABASE_PATH, timeout=10)
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         for path in (DATABASE_PATH, f"{DATABASE_PATH}-wal", f"{DATABASE_PATH}-shm"):
             if path in _chmod_done:
                 continue
@@ -200,6 +230,11 @@ def _db():
 
 def init_db() -> None:
     with _db() as conn:
+        # journal_mode хранится в самом файле БД и переживает переподключения,
+        # поэтому ставим его один раз здесь, а не на каждом _db() (это до ~5
+        # соединений на сообщение × число воркеров): смена journal_mode требует
+        # блокировки БД, а под параллельной нагрузкой это лишняя точка ожидания.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS calories_log (
                 user_id INTEGER NOT NULL,
@@ -838,14 +873,14 @@ def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown",
         payload["reply_markup"] = reply_markup
 
     try:
-        r = requests.post(f"{TELEGRAM_API}/sendMessage",
+        r = tg_session().post(f"{TELEGRAM_API}/sendMessage",
                           json=payload, timeout=TG_TIMEOUT)
         if r.status_code == 400 and parse_mode:
             logger.warning(f"TG 400 with markdown, retry plain: {r.text[:200]}")
             plain_payload = {"chat_id": chat_id, "text": text}
             if reply_markup:
                 plain_payload["reply_markup"] = reply_markup
-            r2 = requests.post(f"{TELEGRAM_API}/sendMessage",
+            r2 = tg_session().post(f"{TELEGRAM_API}/sendMessage",
                                json=plain_payload, timeout=TG_TIMEOUT)
             if not r2.ok:
                 logger.error(f"TG plain retry failed: {r2.status_code} {r2.text[:200]}")
@@ -869,7 +904,7 @@ def tg_send_keyboard(chat_id: int, text: str, buttons: list) -> None:
         "reply_markup": {"inline_keyboard": buttons},
     }
     try:
-        requests.post(f"{TELEGRAM_API}/sendMessage",
+        tg_session().post(f"{TELEGRAM_API}/sendMessage",
                       json=payload, timeout=TG_TIMEOUT)
     except Exception as e:
         logger.error(f"TG keyboard exception: {e}")
@@ -877,7 +912,7 @@ def tg_send_keyboard(chat_id: int, text: str, buttons: list) -> None:
 
 def tg_answer_callback(callback_query_id: str, text: str = "") -> None:
     try:
-        requests.post(f"{TELEGRAM_API}/answerCallbackQuery",
+        tg_session().post(f"{TELEGRAM_API}/answerCallbackQuery",
                       json={"callback_query_id": callback_query_id, "text": text},
                       timeout=TG_TIMEOUT)
     except Exception as e:
@@ -1413,9 +1448,16 @@ def verify_webhook_headers(headers: dict) -> None:
 
 
 def route_message(message: dict) -> None:
-    chat_id = message["chat"]["id"]
-    user_id = message["from"]["id"]
+    # "from" у message — необязательное поле Telegram API (его нет, например,
+    # у постов от имени канала). Прямой message["from"]["id"] ронял обработку
+    # такого update — тот же класс бага, что был у callback_query["message"].
+    chat_id = (message.get("chat") or {}).get("id")
+    user_id = (message.get("from") or {}).get("id")
     text    = (message.get("text") or "").strip()
+
+    if not isinstance(chat_id, int) or not isinstance(user_id, int):
+        logger.warning("ignored message without usable chat/from id")
+        return
 
     logger.info("message received: user=%s chars=%s", user_id, len(text))
 

@@ -2,6 +2,10 @@
 Description=Calories Telegram bot
 After=network-online.target
 Wants=network-online.target
+# Не сдаваться после серии быстрых падений: по умолчанию systemd перестал бы
+# поднимать сервис (StartLimitBurst) и бот остался бы лежать до ручного
+# вмешательства. Для личного бота лучше бесконечные попытки раз в RestartSec.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,6 +16,22 @@ EnvironmentFile=/etc/calories-bot/calories-bot.env
 ExecStart=/opt/calories-bot/venv/bin/python runner.py
 Restart=always
 RestartSec=3
+
+# --- Лимиты ресурсов -------------------------------------------------------
+# Явный потолок памяти: без него всплеск нагрузки утягивал в OOM весь сервер
+# (ядро выбирало жертву само — могло убить соседний контейнер или БД).
+# С MemoryMax cgroup убивает ТОЛЬКО этот сервис, а Restart=always поднимает
+# его через RestartSec. MemoryHigh — мягкий порог: ядро начинает поджимать
+# процесс reclaim'ом раньше, чем дойдёт до убийства.
+# Норма для этого бота — 80-150 МБ; если упирается в потолок регулярно,
+# это симптом утечки, а не повод поднимать лимит не глядя.
+MemoryAccounting=true
+MemoryHigh=256M
+MemoryMax=512M
+# Бот держит пул воркеров (WORKER_THREADS в polling.py) — с запасом.
+TasksMax=64
+
+# --- Изоляция --------------------------------------------------------------
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -1,6 +1,7 @@
 """Long polling для Telegram: режим запуска без домена и входящих портов."""
 
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,11 @@ from index import TELEGRAM_API, process_polled_update
 logger = logging.getLogger(__name__)
 POLL_TIMEOUT = 50
 POLL_RETRY_DELAY = 3
+
+# Отдельная сессия именно для long-poll: соединение держится открытым до 50с,
+# и мешать его в общий пул с исходящими sendMessage не стоит. Плюс keep-alive
+# избавляет от DNS+TLS на каждой итерации цикла.
+_poll_session = requests.Session()
 # Обработка сообщения может ждать AI (до ~2×AI_TIMEOUT секунд на ретрай).
 # Без пула это ждали бы ВСЕ остальные updates — включая команды без AI
 # (кнопки, /today, /history) и сообщения других чатов — потому что
@@ -43,11 +49,22 @@ def get_updates(offset: Optional[int]) -> list[dict]:
     }
     if offset is not None:
         payload["offset"] = offset
-    response = requests.post(
+    response = _poll_session.post(
         f"{TELEGRAM_API}/getUpdates",
         json=payload,
         timeout=POLL_TIMEOUT + 10,
     )
+    # 409 = "terminated by other getUpdates request": тот же токен опрашивают
+    # два процесса (например, не остановленный старый инстанс или вторая
+    # копия сервиса). Они перехватывают updates друг у друга, из-за чего
+    # сообщения приходят рывками и с задержкой. Это не сетевой сбой —
+    # называем причину прямо, иначе её ищут часами.
+    if response.status_code == 409:
+        logger.error(
+            "Telegram 409 Conflict: этот бот-токен опрашивает ещё один процесс. "
+            "Оставь только один: sudo systemctl status calories-bot, "
+            "и проверь, не запущена ли вторая копия бота или webhook."
+        )
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict) or payload.get("ok") is not True:
@@ -96,6 +113,12 @@ def process_updates(updates: list[dict], offset: Optional[int]) -> Optional[int]
 
 def run() -> None:
     """Бесконечно получает updates; дубли защищены SQLite claim_update."""
+    # Стартовая строка с PID: если процесс падает (OOM-kill, краш) и systemd
+    # поднимает его заново, в journalctl видно новый PID. Это отличает
+    # "бот молчал" от "бот перезапустился": после рестарта offset снова None,
+    # Telegram отдаёт весь накопленный хвост одной пачкой — и сообщения
+    # выглядят так, будто бот "проснулся и выплюнул всё разом".
+    logger.info("polling started (pid=%s, workers=%s)", os.getpid(), WORKER_THREADS)
     offset = None
     while True:
         try:

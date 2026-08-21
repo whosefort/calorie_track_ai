@@ -17,6 +17,10 @@ set -Eeuo pipefail
 # Обычный сценарий обновления кода:
 #   git pull && sudo ./deploy.sh deploy
 #
+# Лимит памяти сервиса (по умолчанию MemoryMax=512M) задаётся при деплое:
+#   sudo MEMORY_MAX=1G MEMORY_HIGH=768M ./deploy.sh deploy
+# Проверить фактическое потребление: systemctl status calories-bot
+#
 # Два режима работы бота (выбираются в setup, хранятся в конфиге):
 #   polling  — бот сам опрашивает Telegram. Не нужен домен, HTTPS, открытые
 #              порты. Рекомендуется, если нет отдельного домена под бота.
@@ -45,6 +49,13 @@ CADDY_FILE="/etc/caddy/Caddyfile"
 CADDY_SITE_DIR="/etc/caddy/sites-enabled"
 CADDY_SITE_FILE="${CADDY_SITE_DIR}/${APP_NAME}.caddy"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Потолок памяти сервиса. Нормальное потребление бота — 80-150 МБ; лимит
+# нужен, чтобы всплеск нагрузки убивал только бота (systemd поднимет его
+# заново), а не утягивал в OOM весь сервер вместе с соседями.
+# Переопределяется при запуске: sudo MEMORY_MAX=1G ./deploy.sh deploy
+MEMORY_MAX="${MEMORY_MAX:-512M}"
+MEMORY_HIGH="${MEMORY_HIGH:-256M}"
 
 log()  { printf '\033[0;32m[✓]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -187,8 +198,20 @@ sync_code() {
 
 configure_systemd() {
   install -m 644 "$APP_CODE_DIR/systemd/${APP_NAME}.service" "$SERVICE_FILE"
+  # Лимит памяти задаётся drop-in'ом, а не правкой юнита: так его видно
+  # отдельно, он переживает обновление кода и меняется одной переменной:
+  #   sudo MEMORY_MAX=1G ./deploy.sh deploy
+  mkdir -p "${SERVICE_FILE}.d"
+  cat > "${SERVICE_FILE}.d/limits.conf" <<EOF
+# Сгенерировано deploy.sh. Меняй через MEMORY_MAX/MEMORY_HIGH при запуске.
+[Service]
+MemoryAccounting=true
+MemoryHigh=${MEMORY_HIGH}
+MemoryMax=${MEMORY_MAX}
+EOF
   systemctl daemon-reload
   systemctl enable "$APP_NAME"
+  log "Лимит памяти сервиса: MemoryMax=${MEMORY_MAX} (мягкий порог ${MEMORY_HIGH})"
 }
 
 configure_caddy() {
