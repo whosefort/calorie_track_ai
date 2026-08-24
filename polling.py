@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import requests
-from urllib3.util.retry import Retry
 
 from index import TELEGRAM_API, KeepAliveAdapter, process_polled_update
 
@@ -36,18 +35,18 @@ def _build_poll_session() -> requests.Session:
     до POLL_TIMEOUT, и мешать его в общий пул с исходящими sendMessage не
     стоит. Плюс keep-alive избавляет от DNS+TLS на каждой итерации цикла.
 
-    Ретрай на обрыве соединения здесь безопасен и нужен: getUpdates с тем же
-    offset идемпотентен (вернёт те же updates, а дубли отсекает claim_update),
-    зато без ретрая первая же протухшая keep-alive сессия после простоя даёт
-    исключение, три секунды сна и задержку доставки на ровном месте.
+    БЕЗ ретрая — намеренно. Замерено: urllib3 Retry на дохлом соединении
+    держит вызов ровно в N_попыток раз дольше при том же timeout=, потому
+    что каждая попытка получает СВОЙ полный таймаут заново (Retry этого не
+    ограничивает суммарно). При read=1 (одна попытка ретрая) и
+    POLL_READ_TIMEOUT=35с это ~70с блокировки одного-единственного потока
+    опроса на мёртвом соединении — именно то "завис на минуту", которое
+    должен был чинить keep-alive, а не удваивать. run() и так уже ретраит
+    сам, на уровне цикла (см. POLL_RETRY_DELAY) — с одним таймаутом на
+    попытку и понятным 3-секундным интервалом, без перемножения.
     """
     session = requests.Session()
-    retry = Retry(
-        total=2, connect=2, read=1, status=0,
-        backoff_factor=0.5,
-        allowed_methods=None,   # None = ретраить любые методы, включая POST
-    )
-    session.mount("https://", KeepAliveAdapter(max_retries=retry))
+    session.mount("https://", KeepAliveAdapter(max_retries=0))
     return session
 
 
