@@ -351,6 +351,64 @@ def replace_day(user_id: int, user_text: str, ai_json: str, totals: dict,
     return deleted
 
 
+def replace_meal(user_id: int, date_utc: str, meal_type: str,
+                 user_text: str, ai_json: str, totals: dict) -> int:
+    """Заменяет ОДИН приём пищи за день, не трогая остальные записи дня.
+
+    Запись в calories_log — это весь ответ AI на одно сообщение и может
+    охватывать несколько приёмов пищи сразу (например, «Весь день» хранится
+    одной записью). Поэтому нельзя просто удалить записи по meal_type —
+    вычищаем нужные items из ai_json каждой существующей записи за день:
+    если после этого items не осталось — запись удаляется, если часть
+    осталась — запись пересчитывается и сохраняется урезанной. Затем
+    добавляется одна новая запись с items только что пересчитанного приёма
+    пищи. Возвращает число существующих записей, которые были затронуты.
+    """
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT record_id, ai_json FROM calories_log WHERE user_id = ? AND date_utc = ?",
+            (user_id, date_utc),
+        ).fetchall()
+        touched = 0
+        for row in rows:
+            try:
+                data = json.loads(row["ai_json"])
+                items = data.get("items", [])
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                logger.warning("replace_meal: skipping unparsable record %s", row["record_id"])
+                continue
+            remaining = [item for item in items if item.get("meal_type") != meal_type]
+            if len(remaining) == len(items):
+                continue  # этот приём пищи в записи не встречается — не трогаем
+            touched += 1
+            if not remaining:
+                conn.execute(
+                    "DELETE FROM calories_log WHERE user_id = ? AND record_id = ?",
+                    (user_id, row["record_id"]),
+                )
+                continue
+            new_kcal = sum(item.get("kcal", 0) for item in remaining)
+            new_total = {
+                "protein_g": round(sum(item.get("protein_g", 0) for item in remaining), 1),
+                "fat_g":     round(sum(item.get("fat_g", 0) for item in remaining), 1),
+                "carb_g":    round(sum(item.get("carb_g", 0) for item in remaining), 1),
+            }
+            data["items"] = remaining
+            data["total_kcal"] = new_kcal
+            data["total"] = new_total
+            conn.execute("""
+                UPDATE calories_log
+                SET ai_json = ?, kcal = ?, protein_g = ?, fat_g = ?, carb_g = ?
+                WHERE user_id = ? AND record_id = ?
+            """, (json.dumps(data, ensure_ascii=False), new_kcal,
+                  new_total["protein_g"], new_total["fat_g"], new_total["carb_g"],
+                  user_id, row["record_id"]))
+        _insert_record(conn, user_id, user_text, ai_json, totals, date_utc)
+    logger.info("replaced meal=%s date=%s user=%s (touched %s existing records)",
+               meal_type, date_utc, user_id, touched)
+    return touched
+
+
 def get_history(user_id: int, date_utc: str = None, limit: int = 10) -> list:
     with _db() as conn:
         if date_utc:
@@ -433,7 +491,7 @@ def delete_day(user_id: int, date_utc: str) -> int:
 # сменой ожидания не нужен.
 # ---------------------------------------------------------------------------
 
-_PENDING_TTL = {"rewrite": 300, "meal": 600, "forbidden": 600}
+_PENDING_TTL = {"rewrite": 300, "rewrite_meal": 300, "meal": 600, "forbidden": 600}
 
 
 def save_pending(user_id: int, kind: str, payload: str) -> None:
@@ -973,21 +1031,58 @@ def show_rewrite_keyboard(chat_id: int) -> None:
 
 def handle_rewrite_callback(chat_id: int, user_id: int,
                             callback_query_id: str, date_str: str) -> None:
+    """После выбора даты — выбор «весь день» или конкретный приём пищи."""
     tg_answer_callback(callback_query_id)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yest  = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    if date_str == today:
-        label = f"сегодня ({date_str})"
-    elif date_str == yest:
-        label = f"вчера ({date_str})"
-    else:
-        label = date_str
+    show_rewrite_meal_keyboard(chat_id, date_str)
+
+
+def show_rewrite_meal_keyboard(chat_id: int, date_str: str) -> None:
+    buttons = [
+        [{"text": "🍽 Весь день", "callback_data": f"rewrite_meal:{date_str}:day"}],
+        [
+            {"text": "🌅 Завтрак", "callback_data": f"rewrite_meal:{date_str}:breakfast"},
+            {"text": "☀️ Обед",   "callback_data": f"rewrite_meal:{date_str}:lunch"},
+        ],
+        [
+            {"text": "🌙 Ужин",   "callback_data": f"rewrite_meal:{date_str}:dinner"},
+            {"text": "🍎 Перекус","callback_data": f"rewrite_meal:{date_str}:snack"},
+        ],
+    ]
+    tg_send_keyboard(chat_id, f"Что переписать за {_friendly_date(date_str)}?", buttons)
+
+
+def handle_rewrite_meal_callback(chat_id: int, user_id: int,
+                                 callback_query_id: str, payload: str) -> None:
+    """Обрабатывает выбор «весь день» / конкретного приёма пищи после даты.
+    payload — "ГГГГ-ММ-ДД:day" или "ГГГГ-ММ-ДД:<meal_type>"."""
+    tg_answer_callback(callback_query_id)
+    try:
+        date_str, meal_key = payload.rsplit(":", 1)
+    except ValueError:
+        logger.warning("malformed rewrite_meal payload: %r", payload)
+        return
+    label = _friendly_date(date_str)
+
+    if meal_key == "day":
+        save_pending(user_id, "rewrite", date_str)
+        tg_send(chat_id,
+            f"Весь день — *{label}*.\n\n"
+            f"Напиши что ел в этот день — я пересчитаю и заменю рацион целиком.\n"
+            f"Или /cancel чтобы отменить."
+        )
+        return
+
+    if meal_key not in MEAL_AI_PREFIX:
+        logger.warning("unknown meal_type in rewrite_meal callback: %r", meal_key)
+        return
+    save_pending(user_id, "rewrite_meal", f"{date_str}:{meal_key}")
+    meal_label = MEAL_LABELS.get(meal_key, meal_key)
     tg_send(chat_id,
-        f"Выбрана дата: *{label}*\n\n"
-        f"Напиши что ел в этот день — я пересчитаю и заменю рацион.\n"
+        f"{meal_label} — *{label}*.\n\n"
+        f"Напиши что было на самом деле — заменю только этот приём пищи, "
+        f"остальное за день не тронется.\n"
         f"Или /cancel чтобы отменить."
     )
-    save_pending(user_id, "rewrite", date_str)
 
 
 def show_add_keyboard(chat_id: int) -> None:
@@ -1405,6 +1500,51 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
     tg_send_mk(chat_id, format_ai_response(data) + note)
 
 
+def process_rewrite_meal(chat_id: int, user_id: int, text: str,
+                         date_utc: str, meal_type: str) -> None:
+    """Заменяет ОДИН приём пищи за указанный день, остальное не трогает."""
+    if len(text) > MAX_MESSAGE_LENGTH:
+        tg_send(chat_id, f"Сообщение длиннее {MAX_MESSAGE_LENGTH} символов.")
+        return
+
+    meal_label = MEAL_LABELS.get(meal_type, meal_type)
+    tg_send(chat_id, f"Считаю калории для «{meal_label}» за {date_utc}...")
+
+    # MEAL_AI_PREFIX — тот же приём, что и в /add: подсказка модели, чтобы
+    # все items получили нужный meal_type (иначе замена не найдёт их при
+    # следующем редактировании этого же приёма пищи).
+    ai_input = MEAL_AI_PREFIX.get(meal_type, "") + text
+    data = _safe_call_ai(chat_id, ai_input, context="rewrite_meal",
+                         extra_system=_forbidden_context(user_id))
+    if data is None:
+        return
+
+    try:
+        t = data.get("total", {})
+        touched = replace_meal(
+            user_id=user_id,
+            date_utc=date_utc,
+            meal_type=meal_type,
+            user_text=text,
+            ai_json=json.dumps(data, ensure_ascii=False),
+            totals={
+                "kcal":      data.get("total_kcal", 0),
+                "protein_g": t.get("protein_g", 0),
+                "fat_g":     t.get("fat_g", 0),
+                "carb_g":    t.get("carb_g", 0),
+            },
+        )
+    except Exception as e:
+        logger.error(f"SQLite rewrite_meal error: {e}", exc_info=True)
+        tg_send_mk(chat_id, "⚠️ Посчитал, но не смог переписать в БД.")
+        return
+
+    note = f"\n\n✏️ «{meal_label}» за {date_utc} обновлён"
+    if touched:
+        note += f" (пересчитано старых записей: {touched})"
+    tg_send_mk(chat_id, format_ai_response(data) + note)
+
+
 # ============================================================================
 # КОМАНДЫ
 # ============================================================================
@@ -1419,7 +1559,7 @@ def handle_start(chat_id: int) -> None:
         "📝 *Весь день* — записать всё что ел сегодня одним сообщением\n"
         "📊 *Сегодня* — сводка за сегодня\n"
         "📋 *История* — последние 10 записей\n"
-        "✏️ *Переписать* — исправить рацион за выбранный день\n"
+        "✏️ *Переписать* — исправить рацион за выбранный день целиком или один приём пищи\n"
         "🚫 *Не ем* — список продуктов, которые не ешь (предупрежу, если попадут в блюдо)\n\n"
         "_/cancel — отменить ожидающее действие_"
     ))
@@ -1557,6 +1697,9 @@ def route_message(message: dict) -> None:
             clear_pending(user_id)
             if kind == "rewrite":
                 process_rewrite(chat_id, user_id, text, payload)
+            elif kind == "rewrite_meal":
+                date_str, meal_type = payload.rsplit(":", 1)
+                process_rewrite_meal(chat_id, user_id, text, date_str, meal_type)
             elif kind == "forbidden":
                 save_forbidden(user_id, text)
                 tg_send_mk(chat_id,
@@ -1647,6 +1790,8 @@ def _process_telegram_update(body: dict) -> None:
             return
         if data.startswith("rewrite_date:"):
             handle_rewrite_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
+        elif data.startswith("rewrite_meal:"):
+            handle_rewrite_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         elif data.startswith("add_meal:"):
             handle_add_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         elif data.startswith("forbidden:"):
