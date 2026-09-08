@@ -59,6 +59,18 @@ LLM_MODEL        = os.getenv("LLM_MODEL", "")
 LLM_STRUCTURED_OUTPUT = os.getenv("LLM_STRUCTURED_OUTPUT", "auto").lower()
 LLM_SYSTEM_PROMPT = os.getenv("LLM_SYSTEM_PROMPT", "")
 LLM_TEMPERATURE_RAW = os.getenv("LLM_TEMPERATURE", "").strip()
+
+# Запасной провайдер — необязателен. Если задан (нужны оба: API-ключ и
+# модель), используется ТОЛЬКО когда основной реально недоступен (лимит,
+# 5xx, обрыв соединения) — не по очереди и не при обычных ошибках формата
+# ответа (для тех уже есть свой ретрай на том же провайдере). Так модель,
+# считающая калории, остаётся одной и той же в норме — стиль и точность
+# разбивки не скачут от сообщения к сообщению, а запасной провайдер лишь
+# подстраховывает на случай реального отказа основного.
+LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "https://api.openai.com/v1")
+LLM_FALLBACK_API_KEY  = os.getenv("LLM_FALLBACK_API_KEY", "")
+LLM_FALLBACK_MODEL    = os.getenv("LLM_FALLBACK_MODEL", "")
+LLM_FALLBACK_STRUCTURED_OUTPUT = os.getenv("LLM_FALLBACK_STRUCTURED_OUTPUT", "auto").lower()
 DATABASE_PATH    = os.getenv("DATABASE_PATH", "/var/lib/calories-bot/calories.sqlite3")
 WEBHOOK_BODY_LIMIT = 64 * 1024
 
@@ -120,6 +132,13 @@ def _validate_env():
             missing.append(name)
     if missing:
         logger.error(f"Missing required env vars: {missing}")
+    # Запасной провайдер — либо оба заданы, либо ни одного. Частичная
+    # настройка молча не сработала бы, а выглядела бы как рабочий fallback.
+    if bool(LLM_FALLBACK_API_KEY) != bool(LLM_FALLBACK_MODEL):
+        logger.error(
+            "LLM_FALLBACK_API_KEY и LLM_FALLBACK_MODEL должны быть заданы вместе "
+            "(fallback-провайдер сейчас настроен только частично и не будет работать)"
+        )
 
 _validate_env()
 
@@ -128,27 +147,53 @@ _validate_env()
 # LLM КЛИЕНТ
 # ============================================================================
 
-_ai_client: openai.OpenAI = None
+_ai_clients: dict = {}
 _client_lock = threading.Lock()
 
 
-def _get_ai_client() -> openai.OpenAI:
-    """Единый клиент на процесс: переиспользует HTTP keep-alive соединение,
-    а не платит новым TCP+TLS хендшейком на каждый вызов модели.
-    openai.OpenAI thread-safe (обёртка над httpx.Client) — безопасно делить
-    между воркерами при параллельной обработке updates."""
-    global _ai_client
-    if _ai_client is None:
+def _get_llm_client(api_key: str, base_url: str) -> openai.OpenAI:
+    """Кэширует клиент на пару (api_key, base_url) — по одному на процесс
+    на провайдера, чтобы переиспользовать HTTP keep-alive соединение, а не
+    платить новым TCP+TLS хендшейком на каждый вызов модели. openai.OpenAI
+    thread-safe (обёртка над httpx.Client) — безопасно делить между
+    воркерами при параллельной обработке updates."""
+    key = (api_key, base_url)
+    client = _ai_clients.get(key)
+    if client is None:
         with _client_lock:
-            if _ai_client is None:
-                _ai_client = openai.OpenAI(
-                    api_key=LLM_API_KEY,
-                    base_url=LLM_BASE_URL,
+            client = _ai_clients.get(key)
+            if client is None:
+                client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
                     # Ретраи контролируются в call_ai, чтобы не превысить timeout Telegram.
                     max_retries=0,
                     timeout=AI_TIMEOUT,
                 )
-    return _ai_client
+                _ai_clients[key] = client
+    return client
+
+
+def _get_ai_client() -> openai.OpenAI:
+    return _get_llm_client(LLM_API_KEY, LLM_BASE_URL)
+
+
+def _get_fallback_ai_client() -> openai.OpenAI:
+    return _get_llm_client(LLM_FALLBACK_API_KEY, LLM_FALLBACK_BASE_URL)
+
+
+def _fallback_configured() -> bool:
+    return bool(LLM_FALLBACK_API_KEY and LLM_FALLBACK_MODEL)
+
+
+def _llm_providers() -> list:
+    """Список провайдеров в порядке использования: основной всегда первый,
+    запасной (если настроен) — второй. call_ai пробует их по порядку и
+    переходит к следующему, только если текущий реально отказал."""
+    providers = [(_get_ai_client(), LLM_MODEL, LLM_STRUCTURED_OUTPUT)]
+    if _fallback_configured():
+        providers.append((_get_fallback_ai_client(), LLM_FALLBACK_MODEL, LLM_FALLBACK_STRUCTURED_OUTPUT))
+    return providers
 
 
 def _keepalive_socket_options() -> list:
@@ -907,11 +952,14 @@ def _parse_json_strict(content: str) -> dict:
     return json.loads(content, parse_constant=reject_constant)
 
 
-def _request_completion(user_message: str, structured: bool, extra_system: str = None) -> str:
+def _request_completion(user_message: str, structured: bool, extra_system: str = None,
+                        client: openai.OpenAI = None, model: str = None) -> str:
     """Один OpenAI-compatible Chat Completions запрос.
 
     Это намеренно стандартный API: смена провайдера сводится к LLM_BASE_URL,
-    LLM_API_KEY и LLM_MODEL, без изменений кода бота.
+    LLM_API_KEY и LLM_MODEL, без изменений кода бота. client/model позволяют
+    направить конкретный запрос на запасной провайдер (см. _llm_providers) —
+    по умолчанию используется основной.
 
     extra_system — динамический контекст владельца на конкретный запрос
     (например, персональный список «не ест»). Идёт в system, а не в user,
@@ -926,31 +974,58 @@ def _request_completion(user_message: str, structured: bool, extra_system: str =
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
     ]
-    params = {"model": LLM_MODEL, "messages": messages}
+    params = {"model": model or LLM_MODEL, "messages": messages}
     temperature = _get_temperature()
     if temperature is not None:
         params["temperature"] = temperature
     if structured:
         params["response_format"] = {"type": "json_schema", "json_schema": OUTPUT_SCHEMA}
-    response = _get_ai_client().chat.completions.create(**params)
+    response = (client or _get_ai_client()).chat.completions.create(**params)
     content = response.choices[0].message.content
     if not content:
         raise ValueError("LLM returned an empty completion")
     return content
 
 
-def _call_ai_once(user_message: str, extra_system: str = None) -> dict:
-    """Один вызов AI без ретрая. Возбуждает JSONDecodeError или ValueError."""
-    use_schema = LLM_STRUCTURED_OUTPUT in {"auto", "strict"}
+def _try_provider(user_message: str, extra_system: str, client: openai.OpenAI,
+                  model: str, structured_mode: str) -> str:
+    """Один провайдер целиком: пробует JSON Schema, при отказе (и только
+    если structured_mode='auto') пробует JSON-only на ТОМ ЖЕ провайдере —
+    это лечит "провайдер не умеет response_format", а не отказ провайдера
+    как такового. Если и это не помогло — исключение уходит наверх как
+    сигнал реального отказа провайдера (см. _call_ai_once)."""
+    use_schema = structured_mode in {"auto", "strict"}
     try:
-        raw = _request_completion(user_message, structured=use_schema, extra_system=extra_system)
+        return _request_completion(user_message, structured=use_schema, extra_system=extra_system,
+                                   client=client, model=model)
     except Exception:
-        # У части совместимых API (например, старых локальных серверов) ещё
-        # нет json_schema. В strict-режиме это намеренная ошибка конфигурации.
-        if not use_schema or LLM_STRUCTURED_OUTPUT == "strict":
+        if not use_schema or structured_mode == "strict":
             raise
         logger.warning("Provider rejected JSON Schema; using JSON-only fallback", exc_info=True)
-        raw = _request_completion(user_message, structured=False, extra_system=extra_system)
+        return _request_completion(user_message, structured=False, extra_system=extra_system,
+                                   client=client, model=model)
+
+
+def _call_ai_once(user_message: str, extra_system: str = None) -> dict:
+    """Один вызов AI без ретрая (см. call_ai — тот ретраит на кривой JSON).
+
+    Перебирает провайдеров по порядку (основной, затем запасной, если
+    настроен): переходит к следующему ТОЛЬКО когда текущий реально не
+    ответил (лимит, 5xx, обрыв соединения, и т.п.) — не при каждом вызове,
+    и не переключается обратно в рамках одного _call_ai_once. Возбуждает
+    JSONDecodeError или ValueError, если ни один провайдер не ответил.
+    """
+    providers = _llm_providers()
+    for i, (client, model, structured_mode) in enumerate(providers):
+        try:
+            raw = _try_provider(user_message, extra_system, client, model, structured_mode)
+            break
+        except Exception as e:
+            if i + 1 < len(providers):
+                logger.warning("LLM provider %s/%s failed (%s); trying fallback provider",
+                               i + 1, len(providers), type(e).__name__)
+                continue
+            raise
     logger.debug("AI response received (%s chars)", len(raw))
 
     try:
