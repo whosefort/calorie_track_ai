@@ -98,6 +98,8 @@ MAX_AI_TEXT_LENGTH  = 160
 MAX_AI_TIP_LENGTH   = 300
 MAX_AI_NOTE_LENGTH  = 240   # пометка о блюде: ~30 слов с запасом
 MAX_FORBIDDEN_LENGTH = 400  # список «не ем», хранимый на пользователя
+MAX_DIET_RULES_LENGTH = 400  # текст правил одной диеты
+MAX_DIETS_PER_USER    = 20   # чтобы список диет не рос бесконечно
 
 
 # Валидируем критичные env-переменные при импорте — лучше понятный лог на
@@ -291,6 +293,19 @@ def init_db() -> None:
                 user_id INTEGER PRIMARY KEY,
                 forbidden TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS diets (
+                diet_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                rules TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS diets_user_idx ON diets (user_id);
+            -- Гарантирует на уровне БД то, что мы и так соблюдаем в коде:
+            -- у пользователя одновременно активна максимум одна диета.
+            CREATE UNIQUE INDEX IF NOT EXISTS diets_one_active_idx
+                ON diets (user_id) WHERE is_active = 1;
             CREATE TABLE IF NOT EXISTS processed_updates (
                 update_id INTEGER PRIMARY KEY,
                 received_at INTEGER NOT NULL
@@ -491,7 +506,7 @@ def delete_day(user_id: int, date_utc: str) -> int:
 # сменой ожидания не нужен.
 # ---------------------------------------------------------------------------
 
-_PENDING_TTL = {"rewrite": 300, "rewrite_meal": 300, "meal": 600, "forbidden": 600}
+_PENDING_TTL = {"rewrite": 300, "rewrite_meal": 300, "meal": 600, "forbidden": 600, "diet_add": 600}
 
 
 def save_pending(user_id: int, kind: str, payload: str) -> None:
@@ -557,6 +572,73 @@ def save_forbidden(user_id: int, forbidden: str) -> None:
 
 def clear_forbidden(user_id: int) -> None:
     save_forbidden(user_id, "")
+
+
+# ---------------------------------------------------------------------------
+# diets — «разрешающий» список (в отличие от user_prefs.forbidden, который
+# запрещает). Диет может быть несколько, но активна одновременно только одна
+# (диеты_one_active_idx это же гарантирует и на уровне БД) — её правила
+# передаются модели, и она выставляет каждому блюду значок green/yellow/red.
+# ---------------------------------------------------------------------------
+
+def create_diet(user_id: int, name: str, rules: str) -> str:
+    diet_id = str(uuid.uuid4())
+    with _db() as conn:
+        conn.execute("""
+            INSERT INTO diets (diet_id, user_id, name, rules, is_active, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (diet_id, user_id, name[:80], rules[:MAX_DIET_RULES_LENGTH],
+              int(datetime.now(timezone.utc).timestamp())))
+    return diet_id
+
+
+def list_diets(user_id: int) -> list:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT diet_id, name, rules, is_active FROM diets WHERE user_id = ? ORDER BY created_at",
+            (user_id,),
+        ).fetchall()
+    return [{"diet_id": r["diet_id"], "name": r["name"], "rules": r["rules"],
+             "is_active": bool(r["is_active"])} for r in rows]
+
+
+def get_active_diet(user_id: int):
+    """Возвращает (name, rules) активной диеты, либо None."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT name, rules FROM diets WHERE user_id = ? AND is_active = 1",
+            (user_id,),
+        ).fetchone()
+    return (row["name"], row["rules"]) if row else None
+
+
+def set_active_diet(user_id: int, diet_id: str) -> bool:
+    """Делает диету активной, атомарно снимая активность с остальных.
+    Порядок важен: сначала гасим все, потом зажигаем одну — иначе
+    diets_one_active_idx (UNIQUE WHERE is_active=1) кинет конфликт."""
+    with _db() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM diets WHERE user_id = ? AND diet_id = ?", (user_id, diet_id)
+        ).fetchone()
+        if not exists:
+            return False
+        conn.execute("UPDATE diets SET is_active = 0 WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE diets SET is_active = 1 WHERE user_id = ? AND diet_id = ?",
+                     (user_id, diet_id))
+    return True
+
+
+def deactivate_all_diets(user_id: int) -> None:
+    """Оценку по диете можно выключить, не удаляя сами диеты из списка."""
+    with _db() as conn:
+        conn.execute("UPDATE diets SET is_active = 0 WHERE user_id = ?", (user_id,))
+
+
+def delete_diet(user_id: int, diet_id: str) -> bool:
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM diets WHERE user_id = ? AND diet_id = ?",
+                           (user_id, diet_id))
+    return cur.rowcount > 0
 
 
 def claim_update(update_id: int) -> bool:
@@ -657,7 +739,8 @@ def validate_ai_response(data: dict) -> bool:
     if not isinstance(data["note"], str) or len(data["note"]) > MAX_AI_NOTE_LENGTH:
         logger.error("AI response has invalid note")
         return False
-    required = {"meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g", "portion_note"}
+    required = {"meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g",
+                "portion_note", "diet_badge"}
     for i, item in enumerate(data["items"]):
         if not isinstance(item, dict):
             logger.error("item[%s] is not a dict", i)
@@ -670,6 +753,9 @@ def validate_ai_response(data: dict) -> bool:
            len(item["name"]) > MAX_AI_TEXT_LENGTH or \
            len(item["portion_note"]) > MAX_AI_TEXT_LENGTH:
             logger.error(f"item[{i}] has invalid text fields")
+            return False
+        if item["diet_badge"] not in {"green", "yellow", "red", None}:
+            logger.error("item[%s] has invalid diet_badge: %r", i, item["diet_badge"])
             return False
         for field in ("weight_g", "kcal", "protein_g", "fat_g", "carb_g"):
             if not _is_number(item[field]) or item[field] < 0:
@@ -742,7 +828,7 @@ OUTPUT_SCHEMA = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g", "portion_note"],
+                    "required": ["meal_type", "name", "weight_g", "kcal", "protein_g", "fat_g", "carb_g", "portion_note", "diet_badge"],
                     "properties": {
                         "meal_type": {"anyOf": [{"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]}, {"type": "null"}]},
                         # Gemini OpenAI-совместимый API отклоняет minLength/maxLength;
@@ -754,6 +840,8 @@ OUTPUT_SCHEMA = {
                         "fat_g": {"type": "number", "minimum": 0},
                         "carb_g": {"type": "number", "minimum": 0},
                         "portion_note": {"type": "string"},
+                        # null, если активной диеты нет — см. DEFAULT_SYSTEM_PROMPT.
+                        "diet_badge": {"anyOf": [{"type": "string", "enum": ["green", "yellow", "red"]}, {"type": "null"}]},
                     },
                 },
             },
@@ -786,24 +874,29 @@ DEFAULT_SYSTEM_PROMPT = """Ты — детерминированный каль�
 Правила расчёта:
 - Считай только то, что пользователь уже съел или выпил. Покупки, планы, вопросы и гипотетические продукты не записывай.
 - Считай фактическую массу порции, не значения на 100 г. «Рис 200 г» без слова «сухой» — готовый рис; ресторанное блюдо — готовая порция.
-- Если неизвестны масса, рецепт, жирность, бренд или способ приготовления, оцени типичный вариант. В portion_note коротко напиши допущение, а name закончи символом *.
+- КБЖУ бери из стандартных справочных значений состава продуктов (как в таблицах пищевой ценности), а не приблизительно на глаз — это твой основной источник погрешности не в КБЖУ на 100 г (его ты обычно знаешь точно), а в оценке ВЕСА порции.
+- Если вес порции не указан явно, оценивай его по конкретным бытовым эталонам, а не абстрактным «типичным порциям»: кусок хлеба ≈ 25-30 г, столовая ложка ≈ 15-18 г (сыпучих ≈ 12-15 г), чайная ложка ≈ 5 г, среднее яйцо ≈ 50-55 г, стандартный стакан жидкости ≈ 200-250 мл, порция мяса/рыбы на тарелке ≈ 120-150 г, порция гарнира (гречка/рис/паста, готовые) ≈ 150-200 г, средний банан ≈ 120 г, среднее яблоко ≈ 150-180 г, ресторанная порция супа ≈ 300-350 мл. Используй их как якорь и корректируй по контексту сообщения (указан размер, «маленький», «большая тарелка» и т.п.), а не изобретай вес заново для каждого похожего блюда.
+- Если неизвестны масса, рецепт, жирность, бренд или способ приготовления, оцени по эталонам выше. В portion_note коротко напиши допущение, а name закончи символом *.
 - Отдельные продукты с разным составом или массой — отдельные items. Учитывай упомянутые масло, соусы, сахар, напитки и алкоголь.
 - meal_type: breakfast, lunch, dinner, snack только когда это прямо известно из сообщения или контекста; иначе null.
 - Не выдумывай производителя или источник. Не утверждай, что проверил упаковку или сайт, если пользователь их не дал.
 - note: всегда заполняй короткой, но понятной пометкой о блюде — до 30 слов (одна-две фразы, не обрывок). Уместны: баланс БЖУ, полезность, чего не хватает, простой совет. Если владелец передал список продуктов, которые пользователь не ест, и блюдо их содержит — обязательно предупреди об этом в note. Пиши по-русски, без Markdown.
+- diet_badge: если в контексте владельца указана активная диета с её правилами — оцени КАЖДЫЙ item по шкале green (полностью соответствует диете) / yellow (частично, сомнительно, в небольшом количестве допустимо) / red (явно нарушает диету). Если активной диеты в контексте нет — всегда возвращай null, не выдумывай оценку.
 
 Перед ответом молча проверь:
-- У каждого item есть ровно meal_type, name, weight_g, kcal, protein_g, fat_g, carb_g, portion_note.
+- У каждого item есть ровно meal_type, name, weight_g, kcal, protein_g, fat_g, carb_g, portion_note, diet_badge.
 - weight_g > 0; kcal — целое; weight_g и БЖУ имеют не более одного знака после запятой; все числа — JSON-числа, не строки.
+- Вес каждого item сверен с эталонами выше, а не придуман заново.
 - total_kcal точно равен сумме kcal items; total БЖУ точно равны суммам items.
 - note заполнен всегда (даже без еды), не длиннее 30 слов.
+- diet_badge = null у всех items, если активной диеты нет.
 - Если еды нет: items=[], все итоги 0, tip — короткая подсказка, note — короткий дружелюбный комментарий.
 
 Шаблон item (все ключи обязательны):
-{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}
+{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция","diet_badge":null}
 
 Точный шаблон корневого объекта (все пять ключей обязательны):
-{"items":[{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция"}],"total_kcal":100,"total":{"protein_g":1.0,"fat_g":1.0,"carb_g":1.0},"tip":"Короткая подсказка","note":"Сбалансированное блюдо, белка достаточно."}
+{"items":[{"meal_type":null,"name":"Название*","weight_g":100.0,"kcal":100,"protein_g":1.0,"fat_g":1.0,"carb_g":1.0,"portion_note":"оценка: типичная порция","diet_badge":null}],"total_kcal":100,"total":{"protein_g":1.0,"fat_g":1.0,"carb_g":1.0},"tip":"Короткая подсказка","note":"Сбалансированное блюдо, белка достаточно."}
 
 Не используй total_protein_g, total_fat_g, total_carb_g или meal_type на верхнем уровне. Верни только один JSON-объект по этому шаблону: без Markdown, текста до/после, комментариев, лишних ключей и code fence."""
 
@@ -932,19 +1025,21 @@ BTN_TODAY     = "📊 Сегодня"        # сводка за сегодня
 BTN_HISTORY   = "📋 История"        # последние 10 записей
 BTN_REWRITE   = "✏️ Переписать"     # переписать рацион за выбранный день
 BTN_FORBIDDEN = "🚫 Не ем"          # список продуктов, которые пользователь не ест
+BTN_DIETS     = "🥗 Диеты"          # список диет + активная диета для значков соответствия
 
 MAIN_KEYBOARD = {
     "keyboard": [
         [BTN_ADD,     BTN_DAY_LOG],
         [BTN_TODAY,   BTN_HISTORY],
         [BTN_REWRITE, BTN_FORBIDDEN],
+        [BTN_DIETS],
     ],
     "resize_keyboard": True,
     "is_persistent":   True,   # клавиатура остаётся видимой между сообщениями
 }
 
 # Все тексты кнопок — для маршрутизации в route_message
-_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE, BTN_FORBIDDEN}
+_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE, BTN_FORBIDDEN, BTN_DIETS}
 
 
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown",
@@ -1147,6 +1242,78 @@ def handle_forbidden_callback(chat_id: int, user_id: int,
         tg_send_mk(chat_id, "🚫 Список «не ем» очищен.")
 
 
+def show_diets(chat_id: int, user_id: int) -> None:
+    """Показывает список диет: активную (если есть) и управление."""
+    diets = list_diets(user_id)
+    add_button = {"text": "➕ Добавить диету", "callback_data": "diet:add"}
+    if not diets:
+        text = (
+            "🥗 *У тебя пока нет диет.*\n\n"
+            "Диета — это разрешающий список (в отличие от «Не ем», который "
+            "запрещает): опиши, что тебе можно есть, и я буду отмечать каждое "
+            "блюдо значком 🟢 подходит / 🟡 сомнительно / 🔴 не подходит."
+        )
+        buttons = [[add_button]]
+    else:
+        lines = ["🥗 *Твои диеты:*", ""]
+        for d in diets:
+            mark = "✅ " if d["is_active"] else "◻️ "
+            lines.append(f"{mark}*{_escape_markdown(d['name'])}*")
+        lines.append("")
+        lines.append("_Активна одновременно только одна._")
+        text = "\n".join(lines)
+        buttons = []
+        for d in diets:
+            toggle_label = f"✅ {d['name']} — выключить" if d["is_active"] else f"▶️ {d['name']}"
+            buttons.append([
+                {"text": toggle_label, "callback_data": f"diet:toggle:{d['diet_id']}"},
+                {"text": "🗑", "callback_data": f"diet:delete:{d['diet_id']}"},
+            ])
+        buttons.append([add_button])
+    tg_send_keyboard(chat_id, text, buttons)
+
+
+def handle_diet_callback(chat_id: int, user_id: int,
+                         callback_query_id: str, payload: str) -> None:
+    """Обрабатывает inline-кнопки экрана «Диеты»: добавить/включить/удалить."""
+    tg_answer_callback(callback_query_id)
+
+    if payload == "add":
+        if len(list_diets(user_id)) >= MAX_DIETS_PER_USER:
+            tg_send_mk(chat_id,
+                f"Можно хранить не больше {MAX_DIETS_PER_USER} диет. "
+                f"Удали одну из списка, чтобы добавить новую.")
+            return
+        save_pending(user_id, "diet_add", "")
+        tg_send(chat_id,
+            "Напиши название и правила диеты одним сообщением.\n"
+            "_Например: «Кето» или «Кето: без сахара, хлеба и круп»_\n\n"
+            "_Новая диета сразу станет активной. Или /cancel чтобы отменить._"
+        )
+        return
+
+    try:
+        action, diet_id = payload.split(":", 1)
+    except ValueError:
+        logger.warning("malformed diet callback payload: %r", payload)
+        return
+
+    if action == "toggle":
+        diets = {d["diet_id"]: d for d in list_diets(user_id)}
+        target = diets.get(diet_id)
+        if target is None:
+            show_diets(chat_id, user_id)
+            return
+        if target["is_active"]:
+            deactivate_all_diets(user_id)
+        else:
+            set_active_diet(user_id, diet_id)
+        show_diets(chat_id, user_id)
+    elif action == "delete":
+        delete_diet(user_id, diet_id)
+        show_diets(chat_id, user_id)
+
+
 # ============================================================================
 # ФОРМАТИРОВАНИЕ
 # ============================================================================
@@ -1159,6 +1326,8 @@ MEAL_LABELS = {
     None:        "🍽 Прочее",
 }
 MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack", None]
+
+_DIET_BADGE_EMOJI = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 
 # Префикс, который prepend'ится к запросу пользователя чтобы AI
 # проставил нужный meal_type всем items
@@ -1298,6 +1467,11 @@ def format_ai_response(data: dict) -> str:
             # Заметка о порции — только для оценённых (был *)
             if estimated and item.get("portion_note"):
                 weight_line += f"  _({_escape_markdown(item['portion_note'])})_"
+            # Значок соответствия активной диете — только эмодзи, без текста,
+            # чтобы не утяжелять и без того плотный вывод (см. FR-2).
+            badge = _DIET_BADGE_EMOJI.get(item.get("diet_badge"))
+            if badge:
+                weight_line += f" {badge}"
 
             lines.append(weight_line)
             lines.append(_macros_line(
@@ -1400,6 +1574,26 @@ def _forbidden_context(user_id: int) -> str:
             f"Если блюдо содержит что-то из этого — обязательно предупреди в поле note.")
 
 
+def _diet_context(user_id: int) -> str:
+    """Готовит системную подсказку про активную диету пользователя, либо None.
+
+    В отличие от _forbidden_context (жёсткий запрет), это разрешающий список:
+    модель не блокирует блюдо, а выставляет каждому item значок diet_badge."""
+    diet = get_active_diet(user_id)
+    if not diet:
+        return None
+    name, rules = diet
+    return (f"У пользователя активна диета «{name}»: {rules}. "
+            f"Оцени diet_badge для каждого item по этой диете (см. инструкцию в правилах).")
+
+
+def _ai_extra_context(user_id: int) -> str:
+    """Объединяет весь динамический контекст владельца (запреты + диета)
+    в одну строку для extra_system, либо None если добавить нечего."""
+    parts = [p for p in (_forbidden_context(user_id), _diet_context(user_id)) if p]
+    return "\n".join(parts) if parts else None
+
+
 def process_food_message(chat_id: int, user_id: int, text: str,
                          meal_type: str = None) -> None:
     """Считает калории нового приёма пищи и сохраняет в БД.
@@ -1434,7 +1628,7 @@ def process_food_message(chat_id: int, user_id: int, text: str,
         ai_input = MEAL_AI_PREFIX[meal_type] + text
         logger.info(f"meal_type hint: {meal_type!r}")
 
-    data = _safe_call_ai(chat_id, ai_input, extra_system=_forbidden_context(user_id))
+    data = _safe_call_ai(chat_id, ai_input, extra_system=_ai_extra_context(user_id))
     if data is None:
         release_food_request(reservation_id)
         return
@@ -1471,7 +1665,7 @@ def process_rewrite(chat_id: int, user_id: int, text: str, date_utc: str) -> Non
     tg_send(chat_id, f"Считаю калории для {date_utc}...")
 
     data = _safe_call_ai(chat_id, text, context="rewrite",
-                         extra_system=_forbidden_context(user_id))
+                         extra_system=_ai_extra_context(user_id))
     if data is None:
         return
 
@@ -1515,7 +1709,7 @@ def process_rewrite_meal(chat_id: int, user_id: int, text: str,
     # следующем редактировании этого же приёма пищи).
     ai_input = MEAL_AI_PREFIX.get(meal_type, "") + text
     data = _safe_call_ai(chat_id, ai_input, context="rewrite_meal",
-                         extra_system=_forbidden_context(user_id))
+                         extra_system=_ai_extra_context(user_id))
     if data is None:
         return
 
@@ -1560,7 +1754,8 @@ def handle_start(chat_id: int) -> None:
         "📊 *Сегодня* — сводка за сегодня\n"
         "📋 *История* — последние 10 записей\n"
         "✏️ *Переписать* — исправить рацион за выбранный день целиком или один приём пищи\n"
-        "🚫 *Не ем* — список продуктов, которые не ешь (предупрежу, если попадут в блюдо)\n\n"
+        "🚫 *Не ем* — список продуктов, которые не ешь (предупрежу, если попадут в блюдо)\n"
+        "🥗 *Диеты* — что тебе МОЖНО есть; отмечу каждое блюдо значком 🟢/🟡/🔴\n\n"
         "_/cancel — отменить ожидающее действие_"
     ))
 
@@ -1688,6 +1883,11 @@ def route_message(message: dict) -> None:
             show_forbidden(chat_id, user_id)
             return
 
+        if text == BTN_DIETS:
+            clear_pending(user_id)
+            show_diets(chat_id, user_id)
+            return
+
     # ── Pending-состояние ─────────────────────────────────────────────────
     # Один SELECT вместо двух: get_pending возвращает (kind, payload).
     if not text.startswith("/"):
@@ -1704,6 +1904,16 @@ def route_message(message: dict) -> None:
                 save_forbidden(user_id, text)
                 tg_send_mk(chat_id,
                     f"🚫 Готово. Теперь ты не ешь:\n{_escape_markdown(text.strip())}")
+            elif kind == "diet_add":
+                lines = [l.strip() for l in text.splitlines() if l.strip()]
+                if not lines:
+                    tg_send_mk(chat_id, "Пустой текст, диета не сохранена.")
+                    return
+                name = lines[0][:80]
+                diet_id = create_diet(user_id, name, text.strip())
+                set_active_diet(user_id, diet_id)
+                tg_send_mk(chat_id,
+                    f"🥗 Диета «{_escape_markdown(name)}» добавлена и активирована.")
             else:  # meal
                 process_food_message(chat_id, user_id, text, meal_type=payload)
             return
@@ -1796,6 +2006,8 @@ def _process_telegram_update(body: dict) -> None:
             handle_add_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         elif data.startswith("forbidden:"):
             handle_forbidden_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
+        elif data.startswith("diet:"):
+            handle_diet_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         return
 
     # edited_message намеренно игнорируется — это исключает дубли записей.
