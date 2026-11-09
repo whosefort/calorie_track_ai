@@ -7,9 +7,11 @@ import logging
 from fastapi import FastAPI, HTTPException, Request
 
 from index import WEBHOOK_BODY_LIMIT, process_telegram_update, verify_webhook_headers
+from webapp import router as web_router
 
 app = FastAPI(docs_url=None, redoc_url=None)
 logger = logging.getLogger(__name__)
+app.include_router(web_router)
 
 
 @app.get("/healthz")

@@ -1100,21 +1100,21 @@ BTN_TODAY     = "📊 Сегодня"        # сводка за сегодня
 BTN_HISTORY   = "📋 История"        # последние 10 записей
 BTN_REWRITE   = "✏️ Переписать"     # переписать рацион за выбранный день
 BTN_FORBIDDEN = "🚫 Не ем"          # список продуктов, которые пользователь не ест
+BTN_MORE      = "☰ Ещё"
 BTN_DIETS     = "🥗 Диеты"          # список диет + активная диета для значков соответствия
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [BTN_ADD,     BTN_DAY_LOG],
-        [BTN_TODAY,   BTN_HISTORY],
-        [BTN_REWRITE, BTN_FORBIDDEN],
-        [BTN_DIETS],
+        [BTN_ADD, BTN_TODAY],
+        [BTN_HISTORY, BTN_MORE],
     ],
     "resize_keyboard": True,
     "is_persistent":   True,   # клавиатура остаётся видимой между сообщениями
 }
 
 # Все тексты кнопок — для маршрутизации в route_message
-_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE, BTN_FORBIDDEN, BTN_DIETS}
+_BUTTON_TEXTS = {BTN_ADD, BTN_DAY_LOG, BTN_TODAY, BTN_HISTORY, BTN_REWRITE, BTN_FORBIDDEN, BTN_DIETS, BTN_MORE}
+_MORE_ACTIONS = {"day": BTN_DAY_LOG, "rewrite": BTN_REWRITE, "forbidden": BTN_FORBIDDEN, "diets": BTN_DIETS}
 
 
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown",
@@ -1819,11 +1819,14 @@ def process_rewrite_meal(chat_id: int, user_id: int, text: str,
 # ============================================================================
 
 def handle_start(chat_id: int) -> None:
+    web_url = os.getenv("WEBAPP_URL", "").strip()
+    if web_url.startswith("https://"):
+        tg_send(chat_id, "Открыть дневник:", reply_markup={"inline_keyboard": [[{"text": "📱 Открыть дневник", "web_app": {"url": web_url}}]]})
     tg_send_mk(chat_id, (
         "Привет! Я помогу отслеживать калории.\n\n"
         "Используй кнопки внизу или просто напиши что ел:\n"
         "_«съел гречку 200г и куриную грудку 150г»_\n\n"
-        "*Кнопки:*\n"
+        "*Кнопки (часть находится в меню ☰ Ещё):*\n"
         "➕ *Добавить* — один приём пищи (завтрак/обед/ужин/перекус)\n"
         "📝 *Весь день* — записать всё что ел сегодня одним сообщением\n"
         "📊 *Сегодня* — сводка за сегодня\n"
@@ -1923,6 +1926,14 @@ def route_message(message: dict) -> None:
         # Нажатие кнопки отменяет любое прежнее ожидание ввода.
         # BTN_DAY_LOG сразу ставит новое ожидание (UPSERT перезапишет строку),
         # поэтому для него отдельный clear не нужен — у остальных делаем clear.
+        if text == BTN_MORE:
+            clear_pending(user_id)
+            tg_send_keyboard(chat_id, "Другие действия:", [
+                [{"text": BTN_DAY_LOG, "callback_data": "menu:day"}, {"text": BTN_REWRITE, "callback_data": "menu:rewrite"}],
+                [{"text": BTN_FORBIDDEN, "callback_data": "menu:forbidden"}, {"text": BTN_DIETS, "callback_data": "menu:diets"}],
+            ])
+            return
+
         if text == BTN_ADD:
             clear_pending(user_id)
             show_add_keyboard(chat_id)
@@ -2073,7 +2084,10 @@ def _process_telegram_update(body: dict) -> None:
         if ALLOWED_USERS_INVALID or (ALLOWED_USERS and user_id not in ALLOWED_USERS):
             tg_answer_callback(cq_id, "Нет доступа.")
             return
-        if data.startswith("rewrite_date:"):
+        if data.startswith("menu:") and data[5:] in _MORE_ACTIONS:
+            tg_answer_callback(cq_id)
+            route_message({"chat": {"id": chat_id}, "from": {"id": user_id}, "text": _MORE_ACTIONS[data[5:]]})
+        elif data.startswith("rewrite_date:"):
             handle_rewrite_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
         elif data.startswith("rewrite_meal:"):
             handle_rewrite_meal_callback(chat_id, user_id, cq_id, data.split(":", 1)[1])
