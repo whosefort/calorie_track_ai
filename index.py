@@ -363,6 +363,10 @@ def init_db() -> None:
                 date_utc TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS web_food_drafts (
+                request_id TEXT PRIMARY KEY,
+                ai_json TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS pending_food_requests_user_date_idx
                 ON pending_food_requests (user_id, date_utc);
             CREATE INDEX IF NOT EXISTS pending_food_requests_created_idx
@@ -371,9 +375,9 @@ def init_db() -> None:
 
 
 def _insert_record(conn: sqlite3.Connection, user_id: int, user_text: str,
-                   ai_json: str, totals: dict, date_utc: str = None) -> str:
+                   ai_json: str, totals: dict, date_utc: str = None, record_id: str = None) -> str:
     now = datetime.now(timezone.utc)
-    record_id = str(uuid.uuid4())
+    record_id = record_id or str(uuid.uuid4())
     if date_utc is None:
         date_utc = now.strftime("%Y-%m-%d")
 
@@ -1067,7 +1071,9 @@ def call_ai(user_message: str, extra_system: str = None) -> dict:
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"AI attempt 1 failed ({type(e).__name__}), retrying with explicit JSON prompt")
         # На ретрае явно напоминаем модели про JSON-only формат
-        return _call_ai_once(_RETRY_PREFIX + user_message, extra_system=extra_system)
+        retry = (_RETRY_PREFIX + user_message if isinstance(user_message, str)
+                 else [{"type": "text", "text": _RETRY_PREFIX}, *user_message])
+        return _call_ai_once(retry, extra_system=extra_system)
 
 
 def _safe_call_ai(chat_id: int, text: str, context: str = "", extra_system: str = None):

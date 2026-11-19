@@ -1,12 +1,301 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#edf3e3"><meta name="description" content="Дневник питания, связанный с Telegram-ботом"><title>Дневник питания</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
 :root{font-family:"Avenir Next",Avenir,"Segoe UI",sans-serif;color:#20320f;background:#edf3e3;font-synthesis:none}*{box-sizing:border-box}body{margin:0}main{max-width:620px;margin:auto;padding:calc(24px + env(safe-area-inset-top)) 20px calc(40px + env(safe-area-inset-bottom))}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.brand{font-size:12px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:#617349}.brand-mark{display:inline-grid;place-items:center;width:32px;height:32px;margin-right:7px;background:#405d1c;color:#fff;border-radius:11px;font-size:17px;vertical-align:middle}.sync{font-size:12px;color:#62734d;white-space:nowrap}.sync:before{content:"";display:inline-block;width:7px;height:7px;background:#87a95b;border-radius:50%;margin-right:6px}.intro{padding:32px 0 20px}.eyebrow{margin:0 0 8px;color:#687a53;font-size:13px;font-weight:600}.intro h1{font-size:clamp(34px,9vw,48px);line-height:1.03;letter-spacing:-.05em;margin:0;font-weight:600}.intro p:last-child{margin:12px 0 0;color:#69795a;line-height:1.5;font-size:14px}.summary{background:#fff;border-radius:26px;padding:24px 22px 20px}.section-top{display:flex;justify-content:space-between;align-items:start;gap:14px}.label{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#728362}.date{color:#718063;font-size:13px;text-align:right}.calories{margin-top:17px;display:flex;align-items:baseline;gap:8px}.calories strong{font-size:54px;line-height:1;letter-spacing:-.06em;font-weight:600;font-variant-numeric:tabular-nums}.calories span{font-size:14px;color:#718063}.macros{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:24px;padding-top:17px;border-top:1px solid #e8eee2}.macro span{display:block;font-size:12px;color:#77876a;margin-bottom:6px}.macro strong{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}.day-note{display:flex;align-items:flex-start;gap:10px;margin:14px 3px 0;color:#637550;font-size:12px;line-height:1.5}.clock{font-size:16px;line-height:1.3}.block{margin-top:30px}.heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}.heading h2{font-size:23px;letter-spacing:-.035em;font-weight:600;margin:0}.heading span{font-size:12px;color:#718063}.compose{background:#dce9cd;border-radius:24px;padding:20px}.compose p{font-size:13px;color:#61764a;margin:0 0 14px;line-height:1.45}textarea,select,button{font:inherit;width:100%;border-radius:14px}textarea,select{border:1px solid #bdcfa9;background:#f8fbf4;color:#20320f;padding:14px;outline:none}textarea{resize:vertical;min-height:96px;display:block}textarea::placeholder{color:#8c9b80}select{margin-top:10px;min-height:48px}button{border:0;background:#405f1c;color:#fff;padding:15px;margin-top:12px;font-weight:600;cursor:pointer;transition:background .2s,transform .2s}button:hover{background:#304a13}button:active{transform:scale(.99)}button:disabled{opacity:.55;cursor:default}textarea:focus-visible,select:focus-visible,button:focus-visible{outline:3px solid #9bbd75;outline-offset:2px}.message{font-size:13px;line-height:1.5}.error{color:#a0392f;white-space:pre-wrap}.error:not(:empty),#result:not(:empty){margin-top:12px}.history{background:#fff;border-radius:24px;padding:4px 20px}.entry{padding:17px 0;border-bottom:1px solid #e8eee2}.entry:last-child{border:0}.entry-header{display:flex;justify-content:space-between;gap:12px;align-items:start}.entry strong{font-size:15px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}.entry-cal{white-space:nowrap;font-size:14px;font-weight:600;color:#4b6728}.entry small{display:block;color:#819075;font-size:12px;margin-top:7px;line-height:1.5}.empty{padding:23px 0;color:#78886b;font-size:14px;line-height:1.5}.footer{margin:20px 3px 0;color:#87977a;font-size:11px;line-height:1.5}@media(max-width:350px){main{padding-left:14px;padding-right:14px}.summary{padding:20px 17px}.calories strong{font-size:46px}}@media(prefers-reduced-motion:reduce){*{transition:none!important}}
-</style></head><body><main><header class="top"><div class="brand"><span class="brand-mark" aria-hidden="true">✳</span> Дневник питания</div><span class="sync">Связан с ботом</span></header><div class="intro"><p class="eyebrow">Ваш рацион, в одном месте</p><h1>Хороший день<br>начинается с заботы.</h1><p>Добавляйте еду здесь или в Telegram — дневник общий.</p></div><section class="summary" aria-labelledby="summary-title"><div class="section-top"><span class="label" id="summary-title">Итого за сегодня</span><span class="date" id="date">—</span></div><div class="calories"><strong id="kcal">—</strong><span>ккал</span></div><div class="macros"><div class="macro"><span>Белки</span><strong id="protein">—</strong></div><div class="macro"><span>Жиры</span><strong id="fat">—</strong></div><div class="macro"><span>Углеводы</span><strong id="carb">—</strong></div></div></section><div class="day-note"><span class="clock" aria-hidden="true">◷</span><span id="day-note">Дневник считает сутки по UTC.</span></div><div id="error" class="error message" role="status"></div><section class="block" aria-labelledby="add-title"><div class="heading"><h2 id="add-title">Добавить еду</h2><span>До 500 символов</span></div><div class="compose"><p>Опишите продукты и порции — бот рассчитает КБЖУ.</p><label for="text" class="label">Что вы съели?</label><textarea id="text" maxlength="500" placeholder="Например: гречка 200 г и куриная грудка 150 г"></textarea><label for="meal" class="label">Приём пищи</label><select id="meal"><option value="">Не указан</option><option value="breakfast">Завтрак</option><option value="lunch">Обед</option><option value="dinner">Ужин</option><option value="snack">Перекус</option></select><button id="send">Рассчитать и сохранить ↗</button><div id="result" class="message" role="status"></div></div></section><section class="block" aria-labelledby="history-title"><div class="heading"><h2 id="history-title">История</h2><span>Последние записи</span></div><div id="history" class="history"><div class="empty">Загружаем записи…</div></div></section><p class="footer">Записи и расчёты синхронизируются с вашим Telegram-ботом.</p></main><script>
+.photo-row{margin:12px 0}.photo-row input{max-width:100%}.entry button{width:auto;margin-top:8px;padding:8px 12px;background:#edf3e3;color:#405f1c;font-size:13px}
+.product{padding:12px 0;border-bottom:1px solid #bdcfa9}
+.product input{display:block;width:100%;max-width:120px;padding:8px;font:inherit}
+.product button,#cancel{background:#f8fbf4;color:#405f1c}
+.product button{width:auto;padding:8px 12px}
+button{transition:background .2s ease,transform .18s ease,opacity .2s ease}
+button:active:not(:disabled){transform:scale(.97)}
+#draft:not([hidden]),.entry.is-new{animation:appear .24s ease-out both}
+.entry.is-pending{opacity:.6}
+.entry-state{color:#617349;font-size:12px}
+#result:not(:empty){min-height:1.5em}
+@keyframes appear{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){#draft:not([hidden]),.entry.is-new{animation:none}}
+</style></head><body><main><header class="top"><div class="brand"><span class="brand-mark" aria-hidden="true">✳</span> Дневник питания</div><span class="sync">Связан с ботом</span></header><div class="intro"><p class="eyebrow">Ваш рацион, в одном месте</p><h1>Хороший день<br>начинается с заботы.</h1><p>Добавляйте еду здесь или в Telegram — дневник общий.</p></div><section class="summary" aria-labelledby="summary-title"><div class="section-top"><span class="label" id="summary-title">Итого за сегодня</span><span class="date" id="date">—</span></div><div class="calories"><strong id="kcal">—</strong><span>ккал</span></div><div class="macros"><div class="macro"><span>Белки</span><strong id="protein">—</strong></div><div class="macro"><span>Жиры</span><strong id="fat">—</strong></div><div class="macro"><span>Углеводы</span><strong id="carb">—</strong></div></div></section><div class="day-note"><span class="clock" aria-hidden="true">◷</span><span id="day-note">Дневник считает сутки по UTC.</span></div><div id="error" class="error message" role="status"></div><section class="block" aria-labelledby="add-title"><div class="heading"><h2 id="add-title">Добавить еду</h2><span>До 500 символов</span></div><div class="compose"><p>Опишите продукты и порции — бот рассчитает КБЖУ.</p><label for="text" class="label">Что вы съели?</label><textarea id="text" maxlength="500" placeholder="Например: гречка 200 г и куриная грудка 150 г"></textarea><label for="meal" class="label">Приём пищи</label><select id="meal"><option value="">Не указан</option><option value="breakfast">Завтрак</option><option value="lunch">Обед</option><option value="dinner">Ужин</option><option value="snack">Перекус</option></select><div class="photo-row"><label for="photo">Фото тарелки</label><input id="photo" type="file" accept="image/*" capture="environment"></div><button id="send">Рассчитать КБЖУ</button><div id="draft" hidden>
+<h3>Проверьте продукты и порции</h3>
+<div id="products"></div>
+<p id="draft-total" role="status"></p>
+<button id="confirm" type="button">Сохранить приём пищи</button>
+<button id="cancel" type="button">Отменить расчёт</button>
+</div><div id="result" class="message" role="status"></div></div></section><section class="block" aria-labelledby="history-title"><div class="heading"><h2 id="history-title">История</h2><span>Последние записи</span></div><div id="history" class="history"><div class="empty">Загружаем записи…</div></div></section><p class="footer">Записи и расчёты синхронизируются с вашим Telegram-ботом.</p></main><script>
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const init=tg?.initData||'';const error=document.querySelector('#error');let records=[];let shownDay='';
-async function api(path,options={}){const r=await fetch('/web/api/'+path,{...options,headers:{'X-Telegram-Init-Data':init,'Content-Type':'application/json'}});const data=await r.json();if(!r.ok)throw Error(data.detail||'Ошибка запроса');return data}
+async function api(path,options={}){const r=await fetch('/web/api/'+path,{...options,headers:{'X-Telegram-Init-Data':init,'Content-Type':'application/json'}});const data=await r.json();if(!r.ok)throw Object.assign(Error(typeof data.detail==='string'?data.detail:'Ошибка запроса'),{status:r.status});return data}
 function number(v){return Math.round((Number(v)||0)*10)/10}function node(tag,text,cls){const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e}
 function updateClock(){const now=new Date();const day=now.toISOString().slice(0,10);const end=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));document.querySelector('#date').textContent=new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',year:'numeric',timeZone:'UTC'}).format(now);const localEnd=new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}).format(end);const utcTime=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'}).format(now);document.querySelector('#day-note').textContent=`Сейчас ${utcTime} UTC. День завершится ${localEnd} по времени устройства (00:00 UTC).`;if(shownDay!==day){shownDay=day;renderTotals()}}
-function renderTotals(){const sum=records.filter(r=>r.date_utc===shownDay).reduce((a,r)=>{for(const k of ['kcal','protein_g','fat_g','carb_g'])a[k]+=(Number(r[k])||0);return a},{kcal:0,protein_g:0,fat_g:0,carb_g:0});document.querySelector('#kcal').textContent=number(sum.kcal);for(const [id,key] of [['protein','protein_g'],['fat','fat_g'],['carb','carb_g']])document.querySelector('#'+id).textContent=number(sum[key])+' г'}
-async function load(){try{records=await api('history');renderTotals();const h=document.querySelector('#history');h.replaceChildren();if(!records.length)h.append(node('div','Здесь появятся ваши записи из приложения и бота.','empty'));for(const r of records){const e=node('article','','entry'),head=node('div','','entry-header');head.append(node('strong',r.user_text),node('span',number(r.kcal)+' ккал','entry-cal'));e.append(head,node('small',`${r.date_utc} · Б ${number(r.protein_g)} г · Ж ${number(r.fat_g)} г · У ${number(r.carb_g)} г`));h.append(e)}}catch(e){error.textContent=e.message}}
-document.querySelector('#send').onclick=async()=>{const text=document.querySelector('#text').value.trim();if(!text){error.textContent='Опишите, что вы съели.';return}const button=document.querySelector('#send');button.disabled=true;button.textContent='Считаем…';error.textContent='';document.querySelector('#result').textContent='';try{const result=await api('food',{method:'POST',body:JSON.stringify({text,meal_type:document.querySelector('#meal').value})});document.querySelector('#text').value='';document.querySelector('#result').textContent=`Сохранено: ${number(result.total_kcal)} ккал`;await load()}catch(e){error.textContent=e.message}finally{button.disabled=false;button.textContent='Рассчитать и сохранить ↗'}};updateClock();setInterval(updateClock,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateClock();if(init)load()}});if(!init){error.textContent='Откройте это приложение из Telegram-бота.';document.querySelector('#send').disabled=true;document.querySelector('#history').replaceChildren(node('div','История доступна после входа через Telegram.','empty'))}else load();
+function renderTotals(){const sum=records.filter(r=>r.date_utc===shownDay && !pendingDeletes.has(r.record_id)).reduce((a,r)=>{for(const k of ['kcal','protein_g','fat_g','carb_g'])a[k]+=(Number(r[k])||0);return a},{kcal:0,protein_g:0,fat_g:0,carb_g:0});document.querySelector('#kcal').textContent=number(sum.kcal);for(const [id,key] of [['protein','protein_g'],['fat','fat_g'],['carb','carb_g']])document.querySelector('#'+id).textContent=number(sum[key])+' г'}
+let historyVersion = 0;
+let historyRequest = 0;
+let mutations = 0;
+const pendingDeletes = new Set();
+
+function haptic(kind) {
+  try {
+    const feedback = tg?.HapticFeedback;
+    if (feedback && (!tg.isVersionAtLeast || tg.isVersionAtLeast('6.1'))) {
+      if (kind === 'tap') feedback.impactOccurred('light');
+      else feedback.notificationOccurred(kind);
+    } else {
+      navigator.vibrate?.(kind === 'error' ? [25, 35, 25] : 12);
+    }
+  } catch {}
+}
+
+async function load() {
+  if (mutations) return;
+  const request = ++historyRequest;
+  const version = historyVersion;
+  try {
+    const rows = await api('history');
+    if (request !== historyRequest || version !== historyVersion) return;
+    records = rows;
+    renderHistory();
+  } catch (e) {
+    if (request === historyRequest && version === historyVersion) error.textContent = e.message;
+  }
+}
+
+function renderHistory() {
+  renderTotals();
+  const history = document.querySelector('#history');
+  history.replaceChildren();
+  if (!records.some(record => !pendingDeletes.has(record.record_id))) history.append(node('div', 'Здесь появятся ваши записи из приложения и бота.', 'empty'));
+  for (const record of records) {
+    if (pendingDeletes.has(record.record_id)) continue;
+    const entry = node('article', '', record.pending ? 'entry is-pending is-new' : 'entry');
+    const header = node('div', '', 'entry-header');
+    header.append(node('strong', record.user_text), node('span', number(record.kcal) + ' ккал', 'entry-cal'));
+    entry.append(header, node('small', record.date_utc + ' · ' + nutritionText(record)));
+    if (record.pending) {
+      entry.append(node('span', 'Сохраняем…', 'entry-state'));
+    } else {
+      const remove = node('button', 'Удалить запись');
+      remove.onclick = () => deleteRecord(record);
+      entry.append(remove);
+    }
+    history.append(entry);
+  }
+}
+
+async function deleteRecord(record) {
+  if (pendingDeletes.has(record.record_id) || !window.confirm('Удалить этот приём пищи из общего дневника?')) return;
+  haptic('tap');
+  pendingDeletes.add(record.record_id);
+  mutations++;
+  historyVersion++;
+  error.textContent = 'Удаляем запись…';
+  renderHistory();
+  try {
+    await api('food/' + encodeURIComponent(record.record_id), {method: 'DELETE'});
+    records = records.filter(row => row.record_id !== record.record_id);
+    error.textContent = 'Запись удалена.';
+    haptic('success');
+  } catch (e) {
+    error.textContent = 'Запись восстановлена. ' + e.message;
+    haptic('error');
+  } finally {
+    pendingDeletes.delete(record.record_id);
+    mutations--;
+    historyVersion++;
+    renderHistory();
+  }
+}
+async function encodePhoto(file){
+  if(file.size>25_000_000)throw Error('Выберите фото размером до 25 МБ.');
+  const url=URL.createObjectURL(file);
+  try{
+    const img=new Image();
+    await new Promise((resolve,reject)=>{
+      img.onload=resolve;
+      img.onerror=()=>reject(Error('Не удалось открыть фото. Попробуйте JPEG.'));
+      img.src=url;
+    });
+    const scale=Math.min(1,1280/Math.max(img.naturalWidth,img.naturalHeight));
+    const canvas=document.createElement('canvas');
+    canvas.width=Math.max(1,Math.round(img.naturalWidth*scale));
+    canvas.height=Math.max(1,Math.round(img.naturalHeight*scale));
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    const photo=canvas.toDataURL('image/jpeg',0.8).split(',')[1];
+    if(!photo||photo.length>1_333_332)throw Error('Не удалось уменьшить фото. Выберите другой снимок.');
+    return photo;
+  }finally{URL.revokeObjectURL(url)}
+}
+const send = document.querySelector('#send');
+const draftPanel = document.querySelector('#draft');
+const products = document.querySelector('#products');
+const confirmButton = document.querySelector('#confirm');
+const cancelButton = document.querySelector('#cancel');
+const resultStatus = document.querySelector('#result');
+const textInput = document.querySelector('#text');
+const photoInput = document.querySelector('#photo');
+photoInput.addEventListener('change', () => { if (photoInput.files.length) haptic('tap'); });
+document.querySelector('#meal').addEventListener('change', () => haptic('tap'));
+let draft = null;
+let portions = [];
+let saving = false;
+
+function nutritionText(values) {
+  return `${number(values.kcal)} ккал · Б ${number(values.protein_g)} г · Ж ${number(values.fat_g)} г · У ${number(values.carb_g)} г`;
+}
+
+function updateDraftTotals() {
+  const totals = {kcal: 0, protein_g: 0, fat_g: 0, carb_g: 0};
+  for (const portion of portions) {
+    if (!portion.input.checkValidity()) {
+      portion.summary.textContent = 'Укажите вес от 0,1 до 10 000 г.';
+      continue;
+    }
+    const ratio = portion.input.valueAsNumber / portion.item.weight_g;
+    const scaled = {};
+    for (const field of Object.keys(totals)) {
+      const precision = field === 'kcal' ? 1 : 10;
+      scaled[field] = Math.round(portion.item[field] * ratio * precision) / precision;
+      totals[field] += scaled[field];
+    }
+    portion.summary.textContent = nutritionText(scaled);
+  }
+  const valid = portions.length > 0 && portions.every(portion => portion.input.checkValidity());
+  confirmButton.disabled = !valid || saving;
+  document.querySelector('#draft-total').textContent = valid
+    ? 'Итого: ' + nutritionText(totals)
+    : (portions.length ? 'Проверьте вес продуктов.' : 'В приёме пищи не осталось продуктов.');
+  return totals;
+}
+
+function showDraft() {
+  products.replaceChildren();
+  portions = draft.items.map((item, index) => {
+    const row = node('div', '', 'product');
+    const input = node('input', '');
+    input.type = 'number';
+    input.inputMode = 'decimal';
+    input.min = '0.1';
+    input.max = '10000';
+    input.step = '0.1';
+    input.required = true;
+    input.value = item.weight_g;
+    const label = node('label', 'Вес, г');
+    label.append(input);
+    input.setAttribute('aria-label', 'Вес, г — ' + item.name);
+    input.oninput = updateDraftTotals;
+    input.onchange = () => haptic(input.checkValidity() ? 'tap' : 'error');
+    const summary = node('div', '');
+    const remove = node('button', 'Убрать продукт');
+    remove.onclick = () => {
+      portions = portions.filter(portion => portion.index !== index);
+      haptic('tap');
+      row.remove();
+      updateDraftTotals();
+    };
+    row.append(node('strong', item.name));
+    if (item.portion_note) row.append(node('p', 'Оценка модели: ' + item.portion_note));
+    row.append(label, summary, remove);
+    products.append(row);
+    return {index, item, input, summary};
+  });
+  draftPanel.hidden = false;
+  updateDraftTotals();
+  draftPanel.scrollIntoView({block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+}
+
+function closeDraft() {
+  draft = null;
+  portions = [];
+  draftPanel.hidden = true;
+  send.disabled = false;
+}
+
+send.onclick = async () => {
+  const text = textInput.value.trim();
+  const file = photoInput.files[0];
+  if (!text && !file) {
+    haptic('error');
+    resultStatus.textContent = 'Опишите еду или добавьте фото.';
+    return;
+  }
+  send.disabled = true;
+  haptic('tap');
+  send.setAttribute('aria-busy', 'true');
+  send.textContent = 'Считаем…';
+  resultStatus.textContent = '';
+  try {
+    draft = await api('food', {method: 'POST', body: JSON.stringify({
+      text, photo: file ? await encodePhoto(file) : '',
+      meal_type: document.querySelector('#meal').value
+    })});
+    showDraft();
+    haptic('success');
+  } catch (e) {
+    haptic('error');
+    resultStatus.textContent = e.message;
+  } finally {
+    send.removeAttribute('aria-busy');
+    send.disabled = Boolean(draft);
+    send.textContent = 'Рассчитать КБЖУ';
+  }
+};
+
+async function finishDraft(save) {
+  if (!draft || saving || (save && confirmButton.disabled)) return;
+  haptic('tap');
+  saving = true;
+  cancelButton.disabled = true;
+  const totals = updateDraftTotals();
+  const recordId = draft.id;
+  if (save) {
+    mutations++;
+    historyVersion++;
+    records.unshift({
+      ...totals, record_id: recordId, date_utc: draft.date_utc || shownDay,
+      user_text: portions.map(({item, input}) => item.name + ' (' + input.value + ' г)').join(', '),
+      pending: true
+    });
+    renderHistory();
+  }
+  for (const control of products.querySelectorAll('button, input')) control.disabled = true;
+  resultStatus.textContent = save ? 'Сохраняем…' : '';
+  try {
+    const payload = save ? {
+      method: 'POST',
+      body: JSON.stringify({items: portions.map(({index, input}) => ({index, grams: input.valueAsNumber}))})
+    } : {method: 'DELETE'};
+    const result = await api('food/draft/' + draft.id, payload);
+    closeDraft();
+    haptic('success');
+    if (save) {
+      textInput.value = '';
+      photoInput.value = '';
+      resultStatus.textContent = `Сохранено: ${number(result.total_kcal)} ккал`;
+      const optimistic = records.find(record => record.record_id === recordId);
+      if (optimistic) Object.assign(optimistic, {pending: false, kcal: result.total_kcal});
+    } else {
+      resultStatus.textContent = 'Расчёт отменён.';
+    }
+  } catch (e) {
+    haptic('error');
+    if (save) records = records.filter(record => record.record_id !== recordId);
+    if (e.status === 410) closeDraft();
+    resultStatus.textContent = e.message;
+  } finally {
+    if (save) {
+      mutations--;
+      historyVersion++;
+      renderHistory();
+    }
+    saving = false;
+    cancelButton.disabled = false;
+    for (const control of products.querySelectorAll('button, input')) control.disabled = false;
+    updateDraftTotals();
+  }
+}
+
+confirmButton.onclick = () => finishDraft(true);
+cancelButton.onclick = () => finishDraft(false);
+
+updateClock();setInterval(updateClock,30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateClock();if(init)load()}});if(!init){error.textContent='Откройте это приложение из Telegram-бота.';document.querySelector('#send').disabled=true;document.querySelector('#history').replaceChildren(node('div','История доступна после входа через Telegram.','empty'))}else load();
 </script></body></html>
