@@ -109,6 +109,58 @@ ensure_firewall() {
   fi
 }
 
+choose_llm_routes() {
+  local base_url="$1" api_key="$2" model="$3" schema="$4"
+  local router_key groq_key cf_token cf_account router_model hydrogen=""
+  if [[ "$base_url" == "https://generativelanguage.googleapis.com/v1beta/openai/" && "$model" == "gemini-3.5-flash-lite" ]]; then
+    read -r -p "Использовать Gemini 4 Hydrogen первым для фото? [y/N]: " hydrogen >&2
+  fi
+  read -r -s -p "OpenRouter API key (Enter — пропустить): " router_key >&2; printf '\n' >&2
+  router_model="openrouter/free"
+  if [[ -n "$router_key" ]]; then
+    read -r -p "ID OpenRouter модели для фото [openrouter/free]: " router_model >&2
+    router_model="${router_model:-openrouter/free}"
+  fi
+  read -r -s -p "Groq API key для текстового резерва (Enter — пропустить): " groq_key >&2; printf '\n' >&2
+  read -r -s -p "Cloudflare Workers AI token (Enter — пропустить): " cf_token >&2; printf '\n' >&2
+  cf_account=""
+  if [[ -n "$cf_token" ]]; then
+    read -r -p "Cloudflare Account ID: " cf_account >&2
+    [[ "$cf_account" =~ ^[a-fA-F0-9]{32}$ ]] || fail "Cloudflare Account ID должен содержать 32 шестнадцатеричных символа"
+  fi
+  if [[ -z "$router_key$groq_key$cf_token" && ! "$hydrogen" =~ ^[yY]$ ]]; then
+    return 0
+  fi
+  # Ключи передаются через stdin. Одинарные кавычки вокруг JSON совместимы
+  # с Bash и systemd EnvironmentFile.
+  printf '%s\0' "$base_url" "$api_key" "$model" "$schema" "$hydrogen" "$router_key" "$router_model" "$groq_key" "$cf_token" "$cf_account" |
+    python3 -c '
+import json
+import sys
+
+base, key, model, schema, hydrogen, router, router_model, groq, cf, account = (
+    sys.stdin.buffer.read().decode().split("\0")[:-1]
+)
+def route(url, token, model_id, inputs, mode="auto"):
+    return dict(base_url=url, api_key=token, model=model_id, inputs=inputs,
+                structured_output=mode)
+
+routes = []
+if hydrogen.lower() == "y":
+    routes.append(route(base, key, "gemini-4-hydrogen", ["photo"], "strict"))
+inputs = ["text", "photo"] if model == "gemini-3.5-flash-lite" else ["text"]
+routes.append(route(base, key, model, inputs, schema))
+if router:
+    routes.append(route("https://openrouter.ai/api/v1", router, router_model, ["photo"]))
+if groq:
+    routes.append(route("https://api.groq.com/openai/v1", groq, "openai/gpt-oss-20b", ["text"]))
+if cf:
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
+    routes.append(route(url, cf, "@cf/qwen/qwen3.8-27b", ["text"]))
+print(json.dumps(routes).replace(chr(39), chr(92) + "u0027"))
+'
+}
+
 setup_config() {
   mkdir -p "$CONFIG_DIR" "$DATA_DIR"
   chown "$APP_USER:$APP_USER" "$DATA_DIR"
@@ -162,6 +214,9 @@ setup_config() {
   [[ "$schema" == "auto" || "$schema" == "strict" ]] || fail "Допустимо auto или strict"
   [[ "$mode" != "webhook" ]] || valid_domain "$domain" || fail "Некорректный домен: $domain"
 
+  local llm_routes
+  llm_routes="$(choose_llm_routes "$base_url" "$api_key" "$model" "$schema")"
+
   (
     umask 077
     {
@@ -174,6 +229,9 @@ setup_config() {
       write_env_line LLM_API_KEY "$api_key"
       write_env_line LLM_MODEL "$model"
       write_env_line LLM_STRUCTURED_OUTPUT "$schema"
+      if [[ -n "$llm_routes" ]]; then
+        printf "LLM_ROUTES='%s'\n" "$llm_routes"
+      fi
       write_env_line AI_TIMEOUT "20"
       write_env_line DATABASE_PATH "$DATA_DIR/calories.sqlite3"
       [[ "$mode" != "webhook" ]] || write_env_line BOT_DOMAIN "$domain"
@@ -248,6 +306,7 @@ verify_default_gemini_config() {
   # предлагает по умолчанию. Для другого OpenAI-compatible API не гадаем.
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
+  [[ -z "${LLM_ROUTES:-}" ]] || return 0
   [[ "${LLM_BASE_URL:-}" == "https://generativelanguage.googleapis.com/v1beta/openai/" ]] || return 0
   local result
   result="$(curl --fail-with-body --silent --show-error \

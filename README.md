@@ -273,3 +273,33 @@ LLM_FALLBACK_STRUCTURED_OUTPUT=auto
 Для включения нужен публичный HTTPS-домен. В режиме webhook обновите проект и конфигурацию Caddy из `Caddyfile.template`, затем добавьте в `/etc/calories-bot/calories-bot.env` строку `WEBAPP_URL=https://ваш-домен/web` и перезапустите сервис бота и Caddy. После команды `/start` бот покажет кнопку открытия. Telegram Mini App открывается внутри Telegram; обычная вкладка браузера не содержит подтверждённой идентификации.
 
 В режиме polling существующий процесс не запускает веб-сервер. Для Mini App отдельно запустите `uvicorn app:app --host 127.0.0.1 --port 8080 --workers 1` с теми же переменными окружения и базой, и настройте HTTPS reverse proxy на этот порт. Не запускайте второй экземпляр polling. Доступ к веб-API требует HTTPS; не публикуйте внутренний порт напрямую.
+
+## Маршрутизация между моделями
+
+Для ручной настройки добавьте `LLM_ROUTES` в `/etc/calories-bot/calories-bot.env` по примеру из `config.example.env`. Список записывается одной строкой JSON в одинарных кавычках. Каждый элемент содержит `base_url`, `api_key`, `model`, `inputs` и необязательное поле `structured_output` (по умолчанию `auto`, также доступны `strict` и `off`). `inputs` принимает `text`, `photo` или оба варианта. Без него маршрут обслуживает только текст. Для фото укажите модель, принимающую JPEG через OpenAI-совместимый `image_url`.
+
+Порядок списка задаёт приоритет. Например, поставьте быструю текстовую модель первой, затем мультимодальную для фото и как резерв для текста. При неудачном запросе или невалидном ответе сервер пробует следующую подходящую модель. Бот и Mini App используют один список. После редактирования перезапустите сервис командой `sudo systemctl restart calories-bot`. Чтобы вернуться к прежней настройке, удалите `LLM_ROUTES` и перезапустите сервис.
+
+### Gemini 4 Hydrogen для фото
+
+В примере `LLM_ROUTES` Hydrogen стоит первым только для фото. Gemini 3.5 Flash-Lite обрабатывает текст и принимает фото при сбое Hydrogen, включая HTTP 429 и ошибки формата. Подставьте ключ Gemini в оба маршрута. Перед включением проверьте реальный JPEG с едой командой `python check_gemini_photo.py plate.jpg` в окружении проекта с заданным `GEMINI_API_KEY`. Проверка выполняет один запрос с рабочей JSON Schema и пропускает результат через валидатор бота. Дневник не изменяется.
+
+### Бесплатные резервные модели в deploy.sh
+
+При первом запуске `sudo ./deploy.sh setup` можно ввести ключи резервных сервисов. Enter пропускает сервис. Ключи вводятся скрыто и сохраняются в серверном конфиге. При выборе стандартной Gemini можно включить Hydrogen первым для фото. Деплоер включает фото для основной Gemini 3.5 Flash-Lite, а произвольную основную модель назначает на текст. Если она принимает фото, добавьте `photo` в её `inputs` вручную.
+
+| Сервис | Модель и роль | Где получить доступ |
+|---|---|---|
+| OpenRouter | `openrouter/free` или ID выбранной vision-модели, резерв для фото | [Создать ключ](https://openrouter.ai/settings/keys) · [Каталог бесплатных моделей](https://openrouter.ai/collections/free-models/) |
+| Groq | `openai/gpt-oss-20b`, резерв для текста | [Создать ключ](https://console.groq.com/keys) · [Лимиты](https://console.groq.com/docs/rate-limits) |
+| Cloudflare Workers AI | `@cf/qwen/qwen3.8-27b`, резерв для текста | Нужны Account ID и API token с доступом к Workers AI. [Настройка REST API](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) · [Квоты](https://developers.cloudflare.com/workers-ai/platform/pricing/) |
+
+Для уже работающего бота откройте `sudoedit /etc/calories-bot/calories-bot.env` и добавьте нужные объекты к массиву `LLM_ROUTES` после основных маршрутов. Если массива ещё нет, сначала перенесите в него свои текущие модели. Затем выполните `sudo ./deploy.sh deploy`.
+
+| Маршрут | `base_url` | `inputs` |
+|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` | `["photo"]` |
+| Groq | `https://api.groq.com/openai/v1` | `["text"]` |
+| Cloudflare | `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1` | `["text"]` |
+
+Каждый объект содержит `base_url`, `model`, `inputs` и `api_key`. Используйте ключ соответствующего сервиса. Для Cloudflare замените `ACCOUNT_ID` на ID своего аккаунта. Порядок объектов определяет порядок попыток.

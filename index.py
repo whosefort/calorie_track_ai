@@ -15,6 +15,7 @@ import hmac
 import socket
 import threading
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 import requests
 from urllib3.connection import HTTPConnection
 import openai
@@ -72,6 +73,41 @@ LLM_FALLBACK_API_KEY  = os.getenv("LLM_FALLBACK_API_KEY", "")
 LLM_FALLBACK_MODEL    = os.getenv("LLM_FALLBACK_MODEL", "")
 LLM_FALLBACK_STRUCTURED_OUTPUT = os.getenv("LLM_FALLBACK_STRUCTURED_OUTPUT", "auto").lower()
 DATABASE_PATH    = os.getenv("DATABASE_PATH", "/var/lib/calories-bot/calories.sqlite3")
+def _parse_llm_routes(raw: str) -> list:
+    if not raw.strip():
+        return []
+    try:
+        routes = json.loads(raw)
+    except ValueError:
+        raise SystemExit("LLM_ROUTES: expected a JSON array") from None
+    if not isinstance(routes, list) or not routes:
+        raise SystemExit("LLM_ROUTES: expected a non-empty JSON array")
+    for i, route in enumerate(routes, 1):
+        if not isinstance(route, dict):
+            raise SystemExit(f"LLM_ROUTES entry {i}: expected an object")
+        for field in ("base_url", "api_key", "model"):
+            if not isinstance(route.get(field), str) or not route[field].strip():
+                raise SystemExit(f"LLM_ROUTES entry {i}: missing {field}")
+        try:
+            url = urlsplit(route["base_url"])
+            valid_url = url.scheme in {"http", "https"} and bool(url.hostname) and not url.username
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise SystemExit(f"LLM_ROUTES entry {i}: expected an HTTP(S) base_url")
+        inputs = route.get("inputs", ["text"])
+        if not isinstance(inputs, list) or not inputs or any(value not in ("text", "photo") for value in inputs):
+            raise SystemExit(f"LLM_ROUTES entry {i}: inputs must contain text and/or photo")
+        if route.get("structured_output", "auto") not in ("auto", "strict", "off"):
+            raise SystemExit(f"LLM_ROUTES entry {i}: structured_output must be auto, strict or off")
+    if not any("text" in route.get("inputs", ["text"]) for route in routes):
+        raise SystemExit("LLM_ROUTES: at least one route must accept text")
+    return routes
+
+
+LLM_ROUTES = _parse_llm_routes(os.getenv("LLM_ROUTES", ""))
+
+
 WEBHOOK_BODY_LIMIT = 64 * 1024
 
 def _parse_allowed_users(value: str) -> tuple[set, bool]:
@@ -120,9 +156,10 @@ def _validate_env():
     missing = []
     required = [
         ("TELEGRAM_TOKEN", TELEGRAM_TOKEN),
-        ("LLM_API_KEY",    LLM_API_KEY),
-        ("LLM_MODEL",      LLM_MODEL),
+
     ]
+    if not LLM_ROUTES:
+        required.extend([("LLM_API_KEY", LLM_API_KEY), ("LLM_MODEL", LLM_MODEL)])
     if TELEGRAM_MODE == "webhook":
         required.append(("WEBHOOK_SECRET", WEBHOOK_SECRET))
     elif TELEGRAM_MODE != "polling":
@@ -134,7 +171,7 @@ def _validate_env():
         logger.error(f"Missing required env vars: {missing}")
     # Запасной провайдер — либо оба заданы, либо ни одного. Частичная
     # настройка молча не сработала бы, а выглядела бы как рабочий fallback.
-    if bool(LLM_FALLBACK_API_KEY) != bool(LLM_FALLBACK_MODEL):
+    if not LLM_ROUTES and bool(LLM_FALLBACK_API_KEY) != bool(LLM_FALLBACK_MODEL):
         logger.error(
             "LLM_FALLBACK_API_KEY и LLM_FALLBACK_MODEL должны быть заданы вместе "
             "(fallback-провайдер сейчас настроен только частично и не будет работать)"
@@ -186,10 +223,16 @@ def _fallback_configured() -> bool:
     return bool(LLM_FALLBACK_API_KEY and LLM_FALLBACK_MODEL)
 
 
-def _llm_providers() -> list:
+def _llm_providers(input_type: str = "text") -> list:
     """Список провайдеров в порядке использования: основной всегда первый,
     запасной (если настроен) — второй. call_ai пробует их по порядку и
     переходит к следующему, только если текущий реально отказал."""
+    if LLM_ROUTES:
+        return [
+            (_get_llm_client(route["api_key"], route["base_url"]),
+             route["model"], route.get("structured_output", "auto"))
+            for route in LLM_ROUTES if input_type in route.get("inputs", ["text"])
+        ]
     providers = [(_get_ai_client(), LLM_MODEL, LLM_STRUCTURED_OUTPUT)]
     if _fallback_configured():
         providers.append((_get_fallback_ai_client(), LLM_FALLBACK_MODEL, LLM_FALLBACK_STRUCTURED_OUTPUT))
@@ -1002,12 +1045,16 @@ def _try_provider(user_message: str, extra_system: str, client: openai.OpenAI,
     try:
         return _request_completion(user_message, structured=use_schema, extra_system=extra_system,
                                    client=client, model=model)
-    except Exception:
+    except openai.BadRequestError:
         if not use_schema or structured_mode == "strict":
             raise
         logger.warning("Provider rejected JSON Schema; using JSON-only fallback", exc_info=True)
         return _request_completion(user_message, structured=False, extra_system=extra_system,
                                    client=client, model=model)
+
+
+class PhotoModelUnavailable(RuntimeError):
+    """No configured model can handle images."""
 
 
 def _call_ai_once(user_message: str, extra_system: str = None) -> dict:
@@ -1019,17 +1066,24 @@ def _call_ai_once(user_message: str, extra_system: str = None) -> dict:
     и не переключается обратно в рамках одного _call_ai_once. Возбуждает
     JSONDecodeError или ValueError, если ни один провайдер не ответил.
     """
-    providers = _llm_providers()
+    input_type = "text" if isinstance(user_message, str) else "photo"
+    providers = _llm_providers(input_type)
+    if not providers:
+        raise PhotoModelUnavailable()
+
     for i, (client, model, structured_mode) in enumerate(providers):
         try:
             raw = _try_provider(user_message, extra_system, client, model, structured_mode)
-            break
+            return _parse_ai_result(raw)
         except Exception as e:
             if i + 1 < len(providers):
                 logger.warning("LLM provider %s/%s failed (%s); trying fallback provider",
                                i + 1, len(providers), type(e).__name__)
                 continue
             raise
+
+
+def _parse_ai_result(raw: str) -> dict:
     logger.debug("AI response received (%s chars)", len(raw))
 
     try:
@@ -1065,7 +1119,7 @@ _RETRY_PREFIX = (
 
 def call_ai(user_message: str, extra_system: str = None) -> dict:
     """Вызывает AI агента с автоматическим ретраем при ошибке парсинга."""
-    logger.info("AI call requested (%s chars)", len(user_message))
+    logger.info("AI call requested (%s)", "text" if isinstance(user_message, str) else "photo")
     try:
         return _call_ai_once(user_message, extra_system=extra_system)
     except (json.JSONDecodeError, ValueError) as e:

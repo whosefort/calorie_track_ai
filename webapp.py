@@ -106,6 +106,9 @@ def food(body: Food, user_id: int = Depends(telegram_user)):
                 (reservation, json.dumps(data, ensure_ascii=False)),
             )
         return {'id': reservation, 'date_utc': day, 'items': data['items'], 'note': data['note']}
+    except bot.PhotoModelUnavailable:
+        bot.release_food_request(reservation)
+        raise HTTPException(503, "Расчёт по фото недоступен. Опишите блюдо текстом.")
     except HTTPException:
         bot.release_food_request(reservation)
         raise
