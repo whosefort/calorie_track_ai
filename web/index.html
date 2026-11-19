@@ -14,18 +14,37 @@ button:active:not(:disabled){transform:scale(.97)}
 #result:not(:empty){min-height:1.5em}
 @keyframes appear{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){#draft:not([hidden]),.entry.is-new{animation:none}}
-</style></head><body><main><header class="top"><div class="brand"><span class="brand-mark" aria-hidden="true">✳</span> Дневник питания</div><span class="sync">Связан с ботом</span></header><div class="intro"><p class="eyebrow">Ваш рацион, в одном месте</p><h1>Хороший день<br>начинается с заботы.</h1><p>Добавляйте еду здесь или в Telegram — дневник общий.</p></div><section class="summary" aria-labelledby="summary-title"><div class="section-top"><span class="label" id="summary-title">Итого за сегодня</span><span class="date" id="date">—</span></div><div class="calories"><strong id="kcal">—</strong><span>ккал</span></div><div class="macros"><div class="macro"><span>Белки</span><strong id="protein">—</strong></div><div class="macro"><span>Жиры</span><strong id="fat">—</strong></div><div class="macro"><span>Углеводы</span><strong id="carb">—</strong></div></div></section><div class="day-note"><span class="clock" aria-hidden="true">◷</span><span id="day-note">Дневник считает сутки по UTC.</span></div><div id="error" class="error message" role="status"></div><section class="block" aria-labelledby="add-title"><div class="heading"><h2 id="add-title">Добавить еду</h2><span>До 500 символов</span></div><div class="compose"><p>Опишите продукты и порции — бот рассчитает КБЖУ.</p><label for="text" class="label">Что вы съели?</label><textarea id="text" maxlength="500" placeholder="Например: гречка 200 г и куриная грудка 150 г"></textarea><label for="meal" class="label">Приём пищи</label><select id="meal"><option value="">Не указан</option><option value="breakfast">Завтрак</option><option value="lunch">Обед</option><option value="dinner">Ужин</option><option value="snack">Перекус</option></select><div class="photo-row"><label for="photo">Фото тарелки</label><input id="photo" type="file" accept="image/*" capture="environment"></div><button id="send">Рассчитать КБЖУ</button><div id="draft" hidden>
-<h3>Проверьте продукты и порции</h3>
-<div id="products"></div>
+.top{margin-bottom:16px}.summary{padding:14px 18px}.calories{margin-top:7px}.calories strong{font-size:36px}.macros{margin-top:10px;padding-top:9px}.day-note{margin-top:8px}#add-title{scroll-margin-top:12px}#entry-step label{display:block;margin:8px 0 4px}#photo-preview{display:block;width:88px;height:72px;object-fit:cover;border-radius:10px;margin-top:8px}#photo-preview[hidden]{display:none}#result{scroll-margin:12px}
+</style></head><body><main><header class="top"><div class="brand"><span class="brand-mark" aria-hidden="true">✳</span> Дневник питания</div><span class="sync">Связан с ботом</span></header><section class="summary" aria-labelledby="summary-title"><div class="section-top"><span class="label" id="summary-title">Итого за сегодня</span><span class="date" id="date">—</span></div><div class="calories"><strong id="kcal">—</strong><span>ккал</span></div><div class="macros"><div class="macro"><span>Белки</span><strong id="protein">—</strong></div><div class="macro"><span>Жиры</span><strong id="fat">—</strong></div><div class="macro"><span>Углеводы</span><strong id="carb">—</strong></div></div></section><div class="day-note"><span class="clock" aria-hidden="true">◷</span><span id="day-note">Дневник считает сутки по UTC.</span></div><div id="error" class="error message" role="status"></div><section class="block" aria-labelledby="add-title"><div class="heading"><h2 id="add-title">Добавить еду</h2><span>До 500 символов</span></div><div class="compose"><div id="entry-step"><p>Опишите продукты и порции — бот рассчитает КБЖУ.</p><label for="text" class="label">Что вы съели?</label><textarea id="text" maxlength="500" placeholder="Например: гречка 200 г и куриная грудка 150 г"></textarea><label for="meal" class="label">Приём пищи · необязательно</label><select id="meal"><option value="">Не указан</option><option value="breakfast">Завтрак</option><option value="lunch">Обед</option><option value="dinner">Ужин</option><option value="snack">Перекус</option></select><div class="photo-row"><label for="photo">Фото тарелки</label><input id="photo" type="file" accept="image/*" capture="environment"></div><img id="photo-preview" alt="Выбранное фото тарелки" hidden>
+<button id="send">Рассчитать КБЖУ</button></div><div id="draft" hidden>
+<h3 id="review-title" tabindex="-1">Проверьте продукты и порции</h3>
+<p id="draft-note"></p><div id="products"></div>
 <p id="draft-total" role="status"></p>
 <button id="confirm" type="button">Сохранить приём пищи</button>
-<button id="cancel" type="button">Отменить расчёт</button>
-</div><div id="result" class="message" role="status"></div></div></section><section class="block" aria-labelledby="history-title"><div class="heading"><h2 id="history-title">История</h2><span>Последние записи</span></div><div id="history" class="history"><div class="empty">Загружаем записи…</div></div></section><p class="footer">Записи и расчёты синхронизируются с вашим Telegram-ботом.</p></main><script>
+<button id="cancel" type="button">Изменить фото или описание</button>
+</div><div id="result" class="message" role="status"></div></div></section><section class="block" aria-labelledby="history-title"><div class="heading"><h2 id="history-title">История</h2><span>Последние записи</span></div><div id="history-status" class="message" role="status"></div><div id="history" class="history"><div class="empty">Загружаем записи…</div></div></section><p class="footer">Записи и расчёты синхронизируются с вашим Telegram-ботом.</p></main><script>
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();const init=tg?.initData||'';const error=document.querySelector('#error');let records=[];let shownDay='';
-async function api(path,options={}){const r=await fetch('/web/api/'+path,{...options,headers:{'X-Telegram-Init-Data':init,'Content-Type':'application/json'}});const data=await r.json();if(!r.ok)throw Object.assign(Error(typeof data.detail==='string'?data.detail:'Ошибка запроса'),{status:r.status});return data}
+async function api(path, options = {}) {
+  const response = await fetch('/web/api/' + path, {
+    cache: 'no-store',
+    ...options,
+    headers: {'X-Telegram-Init-Data': init, 'Content-Type': 'application/json'}
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    let message = typeof data?.detail === 'string' ? data.detail : 'Ошибка запроса';
+    if (response.status === 404 && (!data || data.detail === 'Not Found')) {
+      message = 'Сервер не нашёл этот раздел дневника. Переоткройте Mini App. Если ошибка повторится, проверьте обновление сервера.';
+    }
+    throw Object.assign(Error(message), {status: response.status});
+  }
+  if (data === null) throw Error('Сервер вернул неожиданный ответ.');
+  return data;
+}
 function number(v){return Math.round((Number(v)||0)*10)/10}function node(tag,text,cls){const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e}
 function updateClock(){const now=new Date();const day=now.toISOString().slice(0,10);const end=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));document.querySelector('#date').textContent=new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',year:'numeric',timeZone:'UTC'}).format(now);const localEnd=new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}).format(end);const utcTime=new Intl.DateTimeFormat('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'}).format(now);document.querySelector('#day-note').textContent=`Сейчас ${utcTime} UTC. День завершится ${localEnd} по времени устройства (00:00 UTC).`;if(shownDay!==day){shownDay=day;renderTotals()}}
 function renderTotals(){const sum=records.filter(r=>r.date_utc===shownDay && !pendingDeletes.has(r.record_id)).reduce((a,r)=>{for(const k of ['kcal','protein_g','fat_g','carb_g'])a[k]+=(Number(r[k])||0);return a},{kcal:0,protein_g:0,fat_g:0,carb_g:0});document.querySelector('#kcal').textContent=number(sum.kcal);for(const [id,key] of [['protein','protein_g'],['fat','fat_g'],['carb','carb_g']])document.querySelector('#'+id).textContent=number(sum[key])+' г'}
+const historyStatus = document.querySelector('#history-status');
 let historyVersion = 0;
 let historyRequest = 0;
 let mutations = 0;
@@ -50,10 +69,14 @@ async function load() {
   try {
     const rows = await api('history');
     if (request !== historyRequest || version !== historyVersion) return;
+    if (!Array.isArray(rows)) throw Error('Сервер вернул историю в неожиданном формате.');
+    historyStatus.textContent = '';
     records = rows;
     renderHistory();
   } catch (e) {
-    if (request === historyRequest && version === historyVersion) error.textContent = e.message;
+    if (request === historyRequest && version === historyVersion) {
+      historyStatus.textContent = 'Не удалось обновить историю. ' + e.message;
+    }
   }
 }
 
@@ -133,8 +156,37 @@ const cancelButton = document.querySelector('#cancel');
 const resultStatus = document.querySelector('#result');
 const textInput = document.querySelector('#text');
 const photoInput = document.querySelector('#photo');
-photoInput.addEventListener('change', () => { if (photoInput.files.length) haptic('tap'); });
-document.querySelector('#meal').addEventListener('change', () => haptic('tap'));
+const entryStep = document.querySelector('#entry-step');
+const mealInput = document.querySelector('#meal');
+const photoPreview = document.querySelector('#photo-preview');
+let previewUrl = '';
+let expiredEdits = null;
+
+function updatePhotoPreview() {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  const file = photoInput.files[0];
+  previewUrl = file ? URL.createObjectURL(file) : '';
+  photoPreview.hidden = !file;
+  if (file) photoPreview.src = previewUrl;
+  else photoPreview.removeAttribute('src');
+}
+
+function resetCalculationRetry() {
+  expiredEdits = null;
+  send.textContent = 'Рассчитать КБЖУ';
+  resultStatus.textContent = '';
+}
+
+photoInput.addEventListener('change', () => {
+  updatePhotoPreview();
+  resetCalculationRetry();
+  if (photoInput.files.length) haptic('tap');
+});
+textInput.addEventListener('input', resetCalculationRetry);
+mealInput.addEventListener('change', () => {
+  resetCalculationRetry();
+  haptic('tap');
+});
 let draft = null;
 let portions = [];
 let saving = false;
@@ -150,11 +202,13 @@ function updateDraftTotals() {
       portion.summary.textContent = 'Укажите вес от 0,1 до 10 000 г.';
       continue;
     }
-    const ratio = portion.input.valueAsNumber / portion.item.weight_g;
+    const oldWeight = Math.round(portion.item.weight_g * 10);
+    const newWeight = Math.round(portion.input.valueAsNumber * 10);
     const scaled = {};
     for (const field of Object.keys(totals)) {
       const precision = field === 'kcal' ? 1 : 10;
-      scaled[field] = Math.round(portion.item[field] * ratio * precision) / precision;
+      const ticks = Math.round(portion.item[field] * precision) * newWeight;
+      scaled[field] = Math.floor((2 * ticks + oldWeight) / (2 * oldWeight)) / precision;
       totals[field] += scaled[field];
     }
     portion.summary.textContent = nutritionText(scaled);
@@ -169,7 +223,14 @@ function updateDraftTotals() {
 
 function showDraft() {
   products.replaceChildren();
-  portions = draft.items.map((item, index) => {
+  const note = document.querySelector('#draft-note');
+  note.textContent = draft.note || '';
+  note.hidden = !draft.note;
+  const matching = expiredEdits && expiredEdits.names.length === draft.items.length
+    && draft.items.every((item, index) => item.name === expiredEdits.names[index]);
+  portions = draft.items.flatMap((item, index) => {
+    if (matching && !expiredEdits.weights.has(index)) return [];
+
     const row = node('div', '', 'product');
     const input = node('input', '');
     input.type = 'number';
@@ -178,7 +239,7 @@ function showDraft() {
     input.max = '10000';
     input.step = '0.1';
     input.required = true;
-    input.value = item.weight_g;
+    input.value = matching ? expiredEdits.weights.get(index) : item.weight_g;
     const label = node('label', 'Вес, г');
     label.append(input);
     input.setAttribute('aria-label', 'Вес, г — ' + item.name);
@@ -196,9 +257,18 @@ function showDraft() {
     if (item.portion_note) row.append(node('p', 'Оценка модели: ' + item.portion_note));
     row.append(label, summary, remove);
     products.append(row);
-    return {index, item, input, summary};
+    return [{index, item, input, summary}];
   });
+  if (expiredEdits) {
+    resultStatus.textContent = matching
+      ? 'Правки порций восстановлены. Проверьте новый расчёт.'
+      : 'Список продуктов изменился. Проверьте порции заново.';
+    expiredEdits = null;
+  }
+  entryStep.hidden = true;
+  confirmButton.textContent = 'Сохранить приём пищи';
   draftPanel.hidden = false;
+  document.querySelector('#review-title').focus({preventScroll: true});
   updateDraftTotals();
   draftPanel.scrollIntoView({block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
 }
@@ -207,6 +277,7 @@ function closeDraft() {
   draft = null;
   portions = [];
   draftPanel.hidden = true;
+  entryStep.hidden = false;
   send.disabled = false;
 }
 
@@ -219,24 +290,32 @@ send.onclick = async () => {
     return;
   }
   send.disabled = true;
+  for (const field of [textInput, photoInput, mealInput]) field.disabled = true;
+  let failed = false;
   haptic('tap');
   send.setAttribute('aria-busy', 'true');
   send.textContent = 'Считаем…';
   resultStatus.textContent = '';
   try {
-    draft = await api('food', {method: 'POST', body: JSON.stringify({
+    const analysis = await api('food', {method: 'POST', body: JSON.stringify({
       text, photo: file ? await encodePhoto(file) : '',
-      meal_type: document.querySelector('#meal').value
+      meal_type: mealInput.value
     })});
+    if (!analysis.id || !Array.isArray(analysis.items)) {
+      throw Error('Сервер не вернул черновик. Обновите сервер Mini App и проверьте историю перед повторным расчётом.');
+    }
+    draft = analysis;
     showDraft();
     haptic('success');
   } catch (e) {
     haptic('error');
-    resultStatus.textContent = e.message;
+    failed = true;
+    resultStatus.textContent = 'Не удалось рассчитать. ' + e.message;
   } finally {
+    for (const field of [textInput, photoInput, mealInput]) field.disabled = false;
     send.removeAttribute('aria-busy');
     send.disabled = Boolean(draft);
-    send.textContent = 'Рассчитать КБЖУ';
+    send.textContent = failed ? 'Повторить расчёт' : 'Рассчитать КБЖУ';
   }
 };
 
@@ -245,6 +324,7 @@ async function finishDraft(save) {
   haptic('tap');
   saving = true;
   cancelButton.disabled = true;
+  if (save) confirmButton.textContent = 'Сохраняем…';
   const totals = updateDraftTotals();
   const recordId = draft.id;
   if (save) {
@@ -270,22 +350,35 @@ async function finishDraft(save) {
     if (save) {
       textInput.value = '';
       photoInput.value = '';
+      updatePhotoPreview();
       resultStatus.textContent = `Сохранено: ${number(result.total_kcal)} ккал`;
       const optimistic = records.find(record => record.record_id === recordId);
       if (optimistic) Object.assign(optimistic, {pending: false, kcal: result.total_kcal});
     } else {
-      resultStatus.textContent = 'Расчёт отменён.';
+      resultStatus.textContent = 'Фото и описание можно изменить.';
+      textInput.focus();
     }
   } catch (e) {
     haptic('error');
     if (save) records = records.filter(record => record.record_id !== recordId);
-    if (e.status === 410) closeDraft();
-    resultStatus.textContent = e.message;
+    if (save && e.status === 410) {
+      expiredEdits = {
+        names: draft.items.map(item => item.name),
+        weights: new Map(portions.map(({index, input}) => [index, input.valueAsNumber]))
+      };
+      closeDraft();
+      send.textContent = 'Повторить расчёт';
+      resultStatus.textContent = 'Время черновика истекло. После пересчёта восстановим правки, если список продуктов совпадёт.';
+    } else {
+      if (save) confirmButton.textContent = 'Повторить сохранение';
+      resultStatus.textContent = (save ? 'Не удалось сохранить. Правки остались в черновике. ' : '') + e.message;
+    }
   } finally {
     if (save) {
       mutations--;
       historyVersion++;
       renderHistory();
+      if (!draft) void load();
     }
     saving = false;
     cancelButton.disabled = false;

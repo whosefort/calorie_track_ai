@@ -52,12 +52,10 @@ def history(user_id: int = Depends(telegram_user)):
 @router.delete('/web/api/food/{record_id}')
 def delete_food(record_id: UUID, user_id: int = Depends(telegram_user)):
     with bot._db() as conn:
-        deleted = conn.execute(
+        conn.execute(
             'DELETE FROM calories_log WHERE user_id = ? AND record_id = ?',
             (user_id, str(record_id)),
-        ).rowcount
-    if not deleted:
-        raise HTTPException(404, 'Запись уже удалена или недоступна')
+        )
     return {'ok': True}
 
 
@@ -93,6 +91,12 @@ def food(body: Food, user_id: int = Depends(telegram_user)):
         if not data['items']:
             raise HTTPException(422, 'Не удалось распознать продукты. Уточните описание или смените фото.')
         with bot._db() as conn:
+            refreshed = conn.execute(
+                'UPDATE pending_food_requests SET created_at = ? WHERE request_id = ?',
+                (int(time.time()), reservation),
+            ).rowcount
+            if not refreshed:
+                raise HTTPException(409, 'Время расчёта истекло. Попробуйте ещё раз.')
             conn.execute(
                 'DELETE FROM web_food_drafts WHERE request_id NOT IN '
                 '(SELECT request_id FROM pending_food_requests)'
@@ -101,7 +105,7 @@ def food(body: Food, user_id: int = Depends(telegram_user)):
                 'INSERT INTO web_food_drafts (request_id, ai_json) VALUES (?, ?)',
                 (reservation, json.dumps(data, ensure_ascii=False)),
             )
-        return {'id': reservation, 'date_utc': day, 'items': data['items']}
+        return {'id': reservation, 'date_utc': day, 'items': data['items'], 'note': data['note']}
     except HTTPException:
         bot.release_food_request(reservation)
         raise
@@ -160,7 +164,8 @@ def confirm_food(draft_id: UUID, body: FoodConfirmation, user_id: int = Depends(
         ).fetchone()
         if not draft:
             raise HTTPException(410, 'Черновик истёк. Рассчитайте приём пищи заново.')
-        original = json.loads(draft['ai_json'])['items']
+        analysis = json.loads(draft['ai_json'])
+        original = analysis['items']
         items = []
         seen = set()
         for portion in body.items:
@@ -168,17 +173,22 @@ def confirm_food(draft_id: UUID, body: FoodConfirmation, user_id: int = Depends(
                 raise HTTPException(422, 'Проверьте вес продуктов (до одного знака после запятой).')
             seen.add(portion.index)
             item = original[portion.index].copy()
-            ratio = portion.grams / item['weight_g']
+            old_weight = round(item['weight_g'] * 10)
+            new_weight = round(portion.grams * 10)
             if portion.grams != item['weight_g']:
                 item['portion_note'] = ''
             item['weight_g'] = portion.grams
-            item['kcal'] = int(item['kcal'] * ratio + 0.5)
+            item['kcal'] = (2 * round(item['kcal']) * new_weight + old_weight) // (2 * old_weight)
             for field in macros:
-                item[field] = int(item[field] * ratio * 10 + 0.5) / 10
+                ticks = round(item[field] * 10) * new_weight
+                item[field] = ((2 * ticks + old_weight) // (2 * old_weight)) / 10
             items.append(item)
         kcal = sum(item['kcal'] for item in items)
         total = {field: round(sum(item[field] for item in items), 1) for field in macros}
-        data = {'items': items, 'total_kcal': kcal, 'total': total, 'tip': '', 'note': ''}
+        unchanged = items == original
+        data = {'items': items, 'total_kcal': kcal, 'total': total,
+                'tip': analysis['tip'] if unchanged else '',
+                'note': analysis['note'] if unchanged else ''}
         description = ', '.join(f"{item['name']} ({item['weight_g']:g} г)" for item in items)
         bot._insert_record(conn, user_id, description, json.dumps(data, ensure_ascii=False),
                            {'kcal': kcal, **total}, draft['date_utc'], record_id=key)
